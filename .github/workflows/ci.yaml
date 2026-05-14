@@ -1,13 +1,19 @@
-name: quiz-game CI/CD
+---
+name: Build and Scan Frontend Service
 
 on:
   push:
-    branches: [main]
+    branches: [ 'main' ]
+    paths:
+      - 'frontend-service/**'
+      - '.github/workflows/ci.yaml'
   pull_request:
-    branches: [main]
+    branches: [ 'main' ]
+    paths:
+      - 'frontend-service/**'
 
 env:
-  DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+  APP_NAME: frontend-app
   DOCKER_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
   DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
   GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
@@ -15,166 +21,237 @@ env:
   GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
 
 jobs:
-  detect-changes:
-    runs-on: ubuntu-latest
-    outputs:
-      game-service:        ${{ steps.filter.outputs.game-service }}
-      leaderboard-service: ${{ steps.filter.outputs.leaderboard-service }}
-      frontend-service:    ${{ steps.filter.outputs.frontend-service }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            game-service:
-              - 'game-service/**'
-            leaderboard-service:
-              - 'leaderboard-service/**'
-            frontend-service:
-              - 'frontend-service/**'
-
-  build-scan-push:
-    needs: detect-changes
-    runs-on: ubuntu-latest
+ call-docker-build:
+    name: Result Call Docker Build
+    uses: dockersamples/.github/.github/workflows/reusable-docker-build.yaml@main
     permissions:
-      contents: write
-      security-events: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - service:       game-service
-            context:       game-service
-            changed:       ${{ needs.detect-changes.outputs.game-service }}
-            image_name:    game-service
-            manifest:      k8s/game-service/deployment.yaml
-
-          - service:       leaderboard-service
-            context:       leaderboard-service
-            changed:       ${{ needs.detect-changes.outputs.leaderboard-service }}
-            image_name:    leaderboard-service
-            manifest:      k8s/leaderboard-service/deployment.yaml
-
-          - service:       frontend-service
-            context:       frontend-service
-            changed:       ${{ needs.detect-changes.outputs.frontend-service }}
-            image_name:    frontend-service
-            manifest:      k8s/frontend-service/deployment.yaml
-
+      contents: read
+      packages: write
+      pull-requests: write
+      security-events: write 
+    secrets:
+      dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+    with:
+      dockerhub-enable: true
+      ghcr-enable: true
+      image-names: |
+        ghcr.io/${{ github.repository_owner }}/frontend-app
+        # Reference a variable here, NOT a secret
+        ${{ vars.DOCKERHUB_USERNAME }}/frontend-app
+      tag-rules: |
+        type=sha,format=long,prefix=sha-
+        type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+      context: frontend-service
+      dockerfile: frontend-service/Dockerfile
+     
+ trivy-scan:
+    needs: call-docker-build
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        if: matrix.changed == 'true'
-        with:
-          token: ${{ secrets.GIT_TOKEN }}
-
-      - uses: docker/setup-buildx-action@v3
-        if: matrix.changed == 'true'
-
-      - name: Set image tag
-        if: matrix.changed == 'true'
-        id: tag
-        run: echo "TAG=sha-${{ github.sha }}" >> $GITHUB_OUTPUT
-
-      # Build locally first — scan before pushing
-      - name: Build image (local)
-        if: matrix.changed == 'true'
-        uses: docker/build-push-action@v5
-        with:
-          context:    ${{ matrix.context }}
-          load:       true
-          push:       false
-          tags:       ${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to:   type=gha,mode=max,scope=${{ matrix.service }}
-
-      # Trivy — full report to logs
-      - name: Trivy scan (report)
-        if: matrix.changed == 'true'
+      - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref:      "${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}"
-          format:         table
-          exit-code:      "0"
-          severity:       CRITICAL,HIGH
-          vuln-type:      os,library
-          ignore-unfixed: true
+          image-ref: 'ghcr.io/${{ github.repository_owner }}/frontend-app:sha-${{ github.sha }}'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
 
-      # Trivy — SARIF to GitHub Security tab
-      - name: Trivy scan (SARIF)
-        if: matrix.changed == 'true'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref:      "${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}"
-          format:         sarif
-          output:         trivy-${{ matrix.service }}.sarif
-          severity:       CRITICAL,HIGH
-          vuln-type:      os,library
-          ignore-unfixed: true
-
-      - name: Upload SARIF
-        if: matrix.changed == 'true'
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-${{ matrix.service }}.sarif
-          category:   ${{ matrix.service }}
-
-      # Hard fail on CRITICAL — pipeline stops here if any found
-      - name: Fail on CRITICAL CVEs
-        if: matrix.changed == 'true'
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref:      "${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}"
-          format:         table
-          exit-code:      "1"
-          severity:       CRITICAL
-          vuln-type:      os,library
-          ignore-unfixed: true
-
-      # Only reaches here if scan passed
-      - name: Login to Docker Hub
-        if: matrix.changed == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Push image
-        if: matrix.changed == 'true'
-        uses: docker/build-push-action@v5
-        with:
-          context:    ${{ matrix.context }}
-          push:       true
-          tags: |
-            ${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}
-            ${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:latest
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to:   type=gha,mode=max,scope=${{ matrix.service }}
-
-      # GitOps: update manifest tag → ArgoCD picks up the change
-      - name: Update image tag in manifest
-        if: matrix.changed == 'true'
-        run: |
-          sed -i "s|image:.*${{ matrix.image_name }}:.*|image: ${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}|g" \
-            ${{ matrix.manifest }}
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add ${{ matrix.manifest }}
-          git diff --cached --quiet || \
-            git commit -m "ci: update ${{ matrix.service }} → ${{ steps.tag.outputs.TAG }} [skip ci]"
-          git push
-
-  argocd-sync:
-    needs: build-scan-push
+ update-gitops:
+    needs: [call-docker-build, trivy-scan]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger ArgoCD sync
-        env:
-          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
-          ARGOCD_TOKEN:  ${{ secrets.ARGOCD_TOKEN }}
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GIT_TOKEN }}
+
+      - name: Update Image Tag
         run: |
-          curl -sk -X POST \
-            -H "Authorization: Bearer $ARGOCD_TOKEN" \
-            "https://$ARGOCD_SERVER/api/v1/applications/quiz-game/sync" \
-            -d '{"prune":true}' || echo "ArgoCD will auto-sync on next poll"
+           sed -i "s|image: ${{ env.DOCKERHUB_USERNAME }}/${{ env.APP_NAME }}:.*|image: ${{ env.DOCKERHUB_USERNAME }}/${{ env.APP_NAME }}:${{ github.sha }}|g" k8s/frontend-service/deployment.yaml
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "GitOps Bot"
+          git config --global user.email "actions@github.com"
+          git add k8s/frontend-service/deployment.yaml
+          
+          # Check if there are staged changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit. Skipping..."
+          else
+            git commit -m "chore(gitops): update frontend service to sha-${{ github.sha }} [skip ci]"
+            git push
+          fi
+
+---
+name: Build and Scan Game Service
+
+on:
+  push:
+    branches: [ 'main' ]
+    paths:
+      - 'game-service/**'
+      - '.github/workflows/ci.yaml'
+  pull_request:
+    branches: [ 'main' ]
+    paths:
+      - 'game-service/**'
+
+env:
+  APP_NAME: game-app
+  DOCKER_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+  GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
+  GIT_EMAIL: ${{ secrets.GIT_EMAIL }}
+  GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+
+jobs:
+ call-docker-build:
+    name: Result Call Docker Build
+    uses: dockersamples/.github/.github/workflows/reusable-docker-build.yaml@main
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+      security-events: write 
+    secrets:
+      dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+    with:
+      dockerhub-enable: true
+      ghcr-enable: true
+      image-names: |
+        ghcr.io/${{ github.repository_owner }}/game-app
+        # Reference a variable here, NOT a secret
+        ${{ vars.DOCKERHUB_USERNAME }}/game-app
+      tag-rules: |
+        type=sha,format=long,prefix=sha-
+        type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+      context: game-service
+      dockerfile: game-service/Dockerfile
+     
+ trivy-scan:
+    needs: call-docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'ghcr.io/${{ github.repository_owner }}/frontend-app:sha-${{ github.sha }}'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+ update-gitops:
+    needs: [call-docker-build, trivy-scan]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GIT_TOKEN }}
+
+      - name: Update Image Tag
+        run: |
+           sed -i "s|image: ${{ env.DOCKERHUB_USERNAME }}/${{ env.APP_NAME }}:.*|image: ${{ env.DOCKERHUB_USERNAME }}/${{ env.APP_NAME }}:${{ github.sha }}|g" k8s/game-service/deployment.yaml
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "GitOps Bot"
+          git config --global user.email "actions@github.com"
+          git add k8s/game-service/deployment.yaml
+          
+          # Check if there are staged changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit. Skipping..."
+          else
+            git commit -m "chore(gitops): update game service to sha-${{ github.sha }} [skip ci]"
+            git push
+          fi
+
+---
+name: Build and Scan Leaderboard Service
+
+on:
+  push:
+    branches: [ 'main' ]
+    paths:
+      - 'leaderboard-service/**'
+      - '.github/workflows/ci.yaml'
+  pull_request:
+    branches: [ 'main' ]
+    paths:
+      - 'leaderboard-service/**'
+
+env:
+  APP_NAME: leaderboard-app
+  DOCKER_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+  GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
+  GIT_EMAIL: ${{ secrets.GIT_EMAIL }}
+  GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+
+jobs:
+ call-docker-build:
+    name: Result Call Docker Build
+    uses: dockersamples/.github/.github/workflows/reusable-docker-build.yaml@main
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+      security-events: write 
+    secrets:
+      dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+    with:
+      dockerhub-enable: true
+      ghcr-enable: true
+      image-names: |
+        ghcr.io/${{ github.repository_owner }}/leaderboard-app
+        # Reference a variable here, NOT a secret
+        ${{ vars.DOCKERHUB_USERNAME }}/leaderboard-app
+      tag-rules: |
+        type=sha,format=long,prefix=sha-
+        type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+      context: leaderboard-service
+      dockerfile: leaderboard-service/Dockerfile
+     
+ trivy-scan:
+    needs: call-docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'ghcr.io/${{ github.repository_owner }}/frontend-app:sha-${{ github.sha }}'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+ update-gitops:
+    needs: [call-docker-build, trivy-scan]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GIT_TOKEN }}
+
+      - name: Update Image Tag
+        run: |
+           sed -i "s|image: ${{ env.DOCKERHUB_USERNAME }}/${{ env.APP_NAME }}:.*|image: ${{ env.DOCKERHUB_USERNAME }}/${{ env.APP_NAME }}:${{ github.sha }}|g" k8s/leaderboard-service/deployment.yaml
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "GitOps Bot"
+          git config --global user.email "actions@github.com"
+          git add k8s/leaderboard-service/deployment.yaml
+          
+          # Check if there are staged changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit. Skipping..."
+          else
+            git commit -m "chore(gitops): update leaderboard service to sha-${{ github.sha }} [skip ci]"
+            git push
+          fi
