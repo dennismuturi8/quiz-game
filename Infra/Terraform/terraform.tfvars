@@ -1,0 +1,10 @@
+key_name = "k8s-pipeline-key"
+instance_type = "m7i-flex.large"
+nat_instance_type = "t3.micro"
+vpc_cidr = "10.0.0.0/16"
+public_subnets_cidr = ["10.0.1.0/24", "10.0.2.0/24"]
+private_subnets_cidr =  ["10.0.3.0/24", "10.0.4.0/24"]
+availability_zones = ["us-east-1a", "us-east-1b"]
+aws_region = "us-east-1"
+private_key_path = "~/.ssh/k8s-pipeline"
+ssh_user = "ubuntu"

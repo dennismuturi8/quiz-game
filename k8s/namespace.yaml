@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: quiz-game
+  labels:
+    app.kubernetes.io/part-of: quiz-game
+    monitoring: "true"

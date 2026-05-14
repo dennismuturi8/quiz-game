@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DevOps Quiz — Microservices Edition</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --surface2: #21262d;
+      --border: #30363d;
+      --blue: #58a6ff;
+      --green: #3fb950;
+      --red: #f85149;
+      --yellow: #d29922;
+      --purple: #bc8cff;
+      --text: #c9d1d9;
+      --text-dim: #8b949e;
+      --radius: 10px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    header {
+      width: 100%;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header .logo { font-size: 1.5rem; }
+    header h1 { font-size: 1.1rem; font-weight: 600; color: var(--blue); }
+    header .subtitle { font-size: 0.78rem; color: var(--text-dim); margin-left: auto; }
+
+    .container {
+      width: 100%;
+      max-width: 760px;
+      padding: 32px 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 28px;
+    }
+
+    /* ---- HOME ---- */
+    #home-screen .hero { text-align: center; padding: 12px 0 28px; }
+    #home-screen .hero h2 { font-size: 2rem; color: var(--blue); margin-bottom: 8px; }
+    #home-screen .hero p { color: var(--text-dim); font-size: 0.95rem; line-height: 1.6; }
+
+    .arch-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      margin: 20px 0;
+    }
+    .arch-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      text-align: center;
+    }
+    .arch-card .icon { font-size: 1.8rem; margin-bottom: 8px; }
+    .arch-card .label { font-size: 0.78rem; font-weight: 600; color: var(--blue); }
+    .arch-card .desc { font-size: 0.72rem; color: var(--text-dim); margin-top: 4px; }
+
+    .form-row { display: flex; gap: 12px; align-items: center; margin-top: 20px; }
+    .form-row input {
+      flex: 1;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 10px 14px;
+      font-size: 0.95rem;
+      outline: none;
+    }
+    .form-row input:focus { border-color: var(--blue); }
+
+    .select-row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+    .select-row label { font-size: 0.85rem; color: var(--text-dim); width: 100%; }
+    .count-btn {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 8px 18px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      transition: all 0.15s;
+    }
+    .count-btn.active, .count-btn:hover { border-color: var(--blue); color: var(--blue); background: #1a2332; }
+
+    /* ---- BUTTONS ---- */
+    .btn {
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.95rem;
+      font-weight: 600;
+      padding: 11px 24px;
+      transition: all 0.15s;
+      white-space: nowrap;
+    }
+    .btn-primary { background: var(--blue); color: #000; }
+    .btn-primary:hover { background: #79b8ff; }
+    .btn-secondary { background: var(--surface2); border: 1px solid var(--border); color: var(--text); }
+    .btn-secondary:hover { border-color: var(--blue); color: var(--blue); }
+    .btn-green { background: var(--green); color: #000; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* ---- QUIZ ---- */
+    #quiz-screen { display: none; }
+    .progress-bar-wrap {
+      background: var(--surface2);
+      border-radius: 99px;
+      height: 6px;
+      margin-bottom: 20px;
+      overflow: hidden;
+    }
+    .progress-bar { height: 100%; background: var(--blue); border-radius: 99px; transition: width 0.3s; }
+
+    .quiz-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      font-size: 0.85rem;
+    }
+    .quiz-meta .q-counter { color: var(--text-dim); }
+    .quiz-meta .score-badge {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 99px;
+      padding: 4px 14px;
+      color: var(--green);
+      font-weight: 600;
+    }
+
+    .question-text {
+      font-size: 1.15rem;
+      font-weight: 600;
+      line-height: 1.5;
+      margin-bottom: 24px;
+      min-height: 52px;
+    }
+
+    .options-grid { display: flex; flex-direction: column; gap: 10px; }
+    .option-btn {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      cursor: pointer;
+      font-size: 0.93rem;
+      padding: 13px 16px;
+      text-align: left;
+      transition: all 0.15s;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .option-btn:hover:not(:disabled) { border-color: var(--blue); background: #1a2332; }
+    .option-btn.correct { border-color: var(--green); background: #122318; color: var(--green); }
+    .option-btn.wrong { border-color: var(--red); background: #2d1117; color: var(--red); }
+    .option-btn:disabled { cursor: not-allowed; }
+    .option-label {
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.78rem;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .explanation-box {
+      background: var(--surface2);
+      border-left: 3px solid var(--blue);
+      border-radius: 0 8px 8px 0;
+      padding: 12px 16px;
+      margin-top: 16px;
+      font-size: 0.88rem;
+      color: var(--text-dim);
+      display: none;
+    }
+    .explanation-box.show { display: block; }
+
+    .quiz-actions { display: flex; justify-content: flex-end; margin-top: 20px; }
+
+    /* ---- RESULTS ---- */
+    #result-screen { display: none; }
+    .result-hero { text-align: center; padding: 12px 0 24px; }
+    .result-emoji { font-size: 3.5rem; margin-bottom: 12px; }
+    .result-score { font-size: 3rem; font-weight: 700; color: var(--blue); }
+    .result-sub { color: var(--text-dim); font-size: 0.95rem; margin-top: 6px; }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+      margin: 20px 0;
+    }
+    .stat-card {
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      text-align: center;
+    }
+    .stat-card .val { font-size: 1.6rem; font-weight: 700; }
+    .stat-card .lbl { font-size: 0.75rem; color: var(--text-dim); margin-top: 4px; }
+    .val.green { color: var(--green); }
+    .val.red { color: var(--red); }
+    .val.blue { color: var(--blue); }
+
+    .name-submit { display: flex; gap: 10px; margin-top: 16px; }
+    .name-submit input {
+      flex: 1;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      padding: 10px 14px;
+      font-size: 0.95rem;
+      outline: none;
+    }
+    .name-submit input:focus { border-color: var(--blue); }
+
+    /* ---- LEADERBOARD ---- */
+    #leaderboard-screen { display: none; }
+    .lb-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+    .lb-table th {
+      text-align: left;
+      font-size: 0.78rem;
+      color: var(--text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .lb-table td {
+      padding: 11px 12px;
+      font-size: 0.9rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .lb-table tr:last-child td { border-bottom: none; }
+    .lb-table tr:hover td { background: var(--surface2); }
+    .rank-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      font-weight: 700;
+      font-size: 0.82rem;
+    }
+    .rank-1 { background: #f0c040; color: #000; }
+    .rank-2 { background: #adb5bd; color: #000; }
+    .rank-3 { background: #cd7f32; color: #fff; }
+    .rank-other { background: var(--surface2); color: var(--text-dim); border: 1px solid var(--border); }
+
+    /* ---- NAV ---- */
+    .nav-tabs {
+      display: flex;
+      gap: 8px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 6px;
+    }
+    .nav-tab {
+      flex: 1;
+      text-align: center;
+      padding: 8px;
+      border-radius: 7px;
+      cursor: pointer;
+      font-size: 0.88rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      transition: all 0.15s;
+      border: none;
+      background: none;
+    }
+    .nav-tab.active { background: var(--surface2); color: var(--blue); border: 1px solid var(--border); }
+    .nav-tab:hover:not(.active) { color: var(--text); }
+
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px 18px;
+      font-size: 0.9rem;
+      display: none;
+      animation: slideIn 0.2s ease;
+      z-index: 999;
+    }
+    .toast.show { display: block; }
+    .toast.success { border-color: var(--green); color: var(--green); }
+    .toast.error { border-color: var(--red); color: var(--red); }
+
+    @keyframes slideIn { from { transform: translateY(20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+    .hidden { display: none !important; }
+    .loading { color: var(--text-dim); text-align: center; padding: 20px; font-size: 0.9rem; }
+    .error-msg { color: var(--red); font-size: 0.85rem; padding: 8px 0; }
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="logo">🎮</span>
+  <h1>DevOps Quiz — Microservices Edition</h1>
+  <span class="subtitle">Powered by 3 independent microservices</span>
+</header>
+
+<div class="container">
+
+  <div class="nav-tabs">
+    <button class="nav-tab active" onclick="showTab('home')">🏠 Home</button>
+    <button class="nav-tab" onclick="showTab('quiz')" id="tab-quiz">📝 Quiz</button>
+    <button class="nav-tab" onclick="showTab('leaderboard')">🏆 Leaderboard</button>
+  </div>
+
+  <!-- HOME SCREEN -->
+  <div id="home-screen">
+    <div class="card">
+      <div class="hero">
+        <h2>🚀 Test Your DevOps Skills</h2>
+        <p>15 questions covering Kubernetes, Docker, Terraform, AWS, CI/CD and more.<br/>
+        This app runs as <strong style="color:var(--blue)">3 microservices</strong> on Kubernetes!</p>
+      </div>
+
+      <div class="arch-grid">
+        <div class="arch-card">
+          <div class="icon">🌐</div>
+          <div class="label">Frontend Service</div>
+          <div class="desc">Nginx · Port 80<br/>This UI you're seeing</div>
+        </div>
+        <div class="arch-card">
+          <div class="icon">🧠</div>
+          <div class="label">Game Service</div>
+          <div class="desc">Node.js · Port 3001<br/>Questions & answer checking</div>
+        </div>
+        <div class="arch-card">
+          <div class="icon">🏆</div>
+          <div class="label">Leaderboard Service</div>
+          <div class="desc">Node.js + Redis · Port 3002<br/>Persistent high scores</div>
+        </div>
+      </div>
+
+      <div class="select-row">
+        <label>Number of questions:</label>
+        <button class="count-btn" onclick="setCount(5, this)">5</button>
+        <button class="count-btn active" onclick="setCount(10, this)">10</button>
+        <button class="count-btn" onclick="setCount(15, this)">15</button>
+      </div>
+
+      <div class="form-row" style="margin-top:20px">
+        <input type="text" id="player-name" placeholder="Enter your name" maxlength="20" />
+        <button class="btn btn-primary" onclick="startQuiz()">Start Quiz →</button>
+      </div>
+      <div class="error-msg hidden" id="home-error">Please enter your name to start.</div>
+    </div>
+  </div>
+
+  <!-- QUIZ SCREEN -->
+  <div id="quiz-screen">
+    <div class="card">
+      <div class="quiz-meta">
+        <span class="q-counter" id="q-counter">Question 1 of 10</span>
+        <span class="score-badge" id="score-display">Score: 0</span>
+      </div>
+      <div class="progress-bar-wrap">
+        <div class="progress-bar" id="progress-bar" style="width:0%"></div>
+      </div>
+      <div class="question-text" id="question-text">Loading...</div>
+      <div class="options-grid" id="options-grid"></div>
+      <div class="explanation-box" id="explanation-box"></div>
+      <div class="quiz-actions">
+        <button class="btn btn-primary hidden" id="next-btn" onclick="nextQuestion()">Next →</button>
+        <button class="btn btn-primary hidden" id="finish-btn" onclick="finishQuiz()">See Results →</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- RESULT SCREEN -->
+  <div id="result-screen">
+    <div class="card">
+      <div class="result-hero">
+        <div class="result-emoji" id="result-emoji">🎉</div>
+        <div class="result-score" id="result-score">0/10</div>
+        <div class="result-sub" id="result-sub">Well done!</div>
+      </div>
+      <div class="stats-grid">
+        <div class="stat-card">
+          <div class="val green" id="stat-correct">0</div>
+          <div class="lbl">✅ Correct</div>
+        </div>
+        <div class="stat-card">
+          <div class="val red" id="stat-wrong">0</div>
+          <div class="lbl">❌ Wrong</div>
+        </div>
+        <div class="stat-card">
+          <div class="val blue" id="stat-pct">0%</div>
+          <div class="lbl">📊 Accuracy</div>
+        </div>
+      </div>
+      <p style="font-size:0.9rem;color:var(--text-dim);margin-bottom:12px">Submit your score to the leaderboard:</p>
+      <div class="name-submit">
+        <input type="text" id="submit-name" placeholder="Your name" maxlength="20" />
+        <button class="btn btn-green" id="submit-btn" onclick="submitScore()">🏆 Submit</button>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:16px">
+        <button class="btn btn-secondary" onclick="startQuiz(true)">🔄 Play Again</button>
+        <button class="btn btn-secondary" onclick="showTab('leaderboard')">📊 Leaderboard</button>
+        <button class="btn btn-secondary" onclick="showTab('home')" style="margin-left:auto">🏠 Home</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- LEADERBOARD SCREEN -->
+  <div id="leaderboard-screen">
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <h2 style="font-size:1.1rem">🏆 Top Players</h2>
+        <button class="btn btn-secondary" onclick="loadLeaderboard()" style="padding:6px 14px;font-size:0.82rem">↻ Refresh</button>
+      </div>
+      <div id="lb-content"><div class="loading">Loading leaderboard...</div></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  // ── Config: Ingress routes these paths to the right microservice ──
+  const GAME_API    = window.GAME_API_URL    || '/api/game';
+  const BOARD_API   = window.LEADERBOARD_API_URL || '/api/leaderboard';
+
+  // ── State ──
+  let questions      = [];
+  let currentIndex   = 0;
+  let score          = 0;
+  let answered       = false;
+  let questionCount  = 10;
+  let playerName     = '';
+
+  // ── Tab navigation ──
+  function showTab(tab) {
+    ['home', 'quiz', 'leaderboard'].forEach(t => {
+      document.getElementById(t + '-screen').style.display = 'none';
+    });
+    document.getElementById('result-screen').style.display = 'none';
+
+    const tabEls = document.querySelectorAll('.nav-tab');
+    tabEls.forEach((el, i) => {
+      const tabs = ['home', 'quiz', 'leaderboard'];
+      el.classList.toggle('active', tabs[i] === tab);
+    });
+
+    if (tab === 'quiz' && questions.length > 0) {
+      document.getElementById('quiz-screen').style.display = 'block';
+    } else if (tab !== 'quiz') {
+      document.getElementById(tab + '-screen').style.display = 'block';
+    }
+    if (tab === 'leaderboard') loadLeaderboard();
+  }
+
+  function setCount(n, el) {
+    questionCount = n;
+    document.querySelectorAll('.count-btn').forEach(b => b.classList.remove('active'));
+    el.classList.add('active');
+  }
+
+  // ── Start quiz ──
+  async function startQuiz(replay = false) {
+    const nameInput = document.getElementById('player-name');
+    const name = replay ? playerName : nameInput.value.trim();
+    if (!name) {
+      document.getElementById('home-error').classList.remove('hidden');
+      return;
+    }
+    document.getElementById('home-error').classList.add('hidden');
+    playerName = name;
+    document.getElementById('submit-name').value = name;
+
+    try {
+      const res  = await fetch(`${GAME_API}/questions/random?count=${questionCount}`);
+      const data = await res.json();
+      questions    = data.questions;
+      currentIndex = 0;
+      score        = 0;
+
+      document.querySelectorAll('.nav-tab')[1].classList.add('active');
+      document.querySelectorAll('.nav-tab')[0].classList.remove('active');
+      document.querySelectorAll('.nav-tab')[2].classList.remove('active');
+
+      ['home-screen', 'result-screen', 'leaderboard-screen'].forEach(id => {
+        document.getElementById(id).style.display = 'none';
+      });
+      document.getElementById('quiz-screen').style.display = 'block';
+
+      renderQuestion();
+    } catch (e) {
+      showToast('❌ Could not reach game-service. Is it running?', 'error');
+    }
+  }
+
+  function renderQuestion() {
+    answered = false;
+    const q   = questions[currentIndex];
+    const tot = questions.length;
+    const pct = Math.round((currentIndex / tot) * 100);
+
+    document.getElementById('q-counter').textContent    = `Question ${currentIndex + 1} of ${tot}`;
+    document.getElementById('score-display').textContent = `Score: ${score}`;
+    document.getElementById('progress-bar').style.width  = pct + '%';
+    document.getElementById('question-text').textContent = q.question;
+    document.getElementById('explanation-box').classList.remove('show');
+    document.getElementById('next-btn').classList.add('hidden');
+    document.getElementById('finish-btn').classList.add('hidden');
+
+    const labels = ['A', 'B', 'C', 'D'];
+    const grid   = document.getElementById('options-grid');
+    grid.innerHTML = '';
+    q.options.forEach((opt, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'option-btn';
+      btn.innerHTML = `<span class="option-label">${labels[i]}</span>${opt}`;
+      btn.onclick   = () => checkAnswer(i, btn);
+      grid.appendChild(btn);
+    });
+  }
+
+  async function checkAnswer(selected, btn) {
+    if (answered) return;
+    answered = true;
+
+    const q = questions[currentIndex];
+    try {
+      const res  = await fetch(`${GAME_API}/check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ questionId: q.id, answer: selected }),
+      });
+      const data = await res.json();
+
+      const btns = document.querySelectorAll('.option-btn');
+      btns.forEach(b => b.disabled = true);
+
+      if (data.correct) {
+        btn.classList.add('correct');
+        score++;
+      } else {
+        btn.classList.add('wrong');
+        btns[data.correctAnswer].classList.add('correct');
+      }
+
+      const expBox = document.getElementById('explanation-box');
+      expBox.textContent = '💡 ' + (data.explanation || '');
+      expBox.classList.add('show');
+
+      const isLast = currentIndex === questions.length - 1;
+      document.getElementById(isLast ? 'finish-btn' : 'next-btn').classList.remove('hidden');
+    } catch (e) {
+      showToast('❌ Could not verify answer — is game-service reachable?', 'error');
+    }
+  }
+
+  function nextQuestion() {
+    currentIndex++;
+    renderQuestion();
+  }
+
+  function finishQuiz() {
+    const tot = questions.length;
+    const pct = Math.round((score / tot) * 100);
+
+    let emoji, sub;
+    if (pct >= 90)      { emoji = '🏆'; sub = 'Outstanding! You\'re a DevOps pro!'; }
+    else if (pct >= 70) { emoji = '🎉'; sub = 'Great job! Keep learning!'; }
+    else if (pct >= 50) { emoji = '👍'; sub = 'Good effort — keep practising!'; }
+    else                { emoji = '📚'; sub = 'Keep studying — you\'ll get there!'; }
+
+    document.getElementById('result-emoji').textContent   = emoji;
+    document.getElementById('result-score').textContent   = `${score}/${tot}`;
+    document.getElementById('result-sub').textContent     = sub;
+    document.getElementById('stat-correct').textContent   = score;
+    document.getElementById('stat-wrong').textContent     = tot - score;
+    document.getElementById('stat-pct').textContent       = pct + '%';
+
+    document.getElementById('quiz-screen').style.display   = 'none';
+    document.getElementById('result-screen').style.display = 'block';
+  }
+
+  async function submitScore() {
+    const name  = document.getElementById('submit-name').value.trim() || playerName;
+    const btn   = document.getElementById('submit-btn');
+    if (!name) { showToast('Enter your name first!', 'error'); return; }
+
+    btn.disabled = true;
+    btn.textContent = 'Submitting…';
+
+    try {
+      const res  = await fetch(`${BOARD_API}/score`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, score, totalQuestions: questions.length }),
+      });
+      const data = await res.json();
+      showToast(`🏆 Submitted! You ranked #${data.rank}`, 'success');
+      btn.textContent = '✅ Submitted';
+    } catch (e) {
+      showToast('❌ Could not reach leaderboard-service.', 'error');
+      btn.disabled = false;
+      btn.textContent = '🏆 Submit';
+    }
+  }
+
+  async function loadLeaderboard() {
+    const content = document.getElementById('lb-content');
+    content.innerHTML = '<div class="loading">Fetching from leaderboard-service…</div>';
+    try {
+      const res  = await fetch(`${BOARD_API}/leaderboard?limit=15`);
+      const data = await res.json();
+      if (!data.leaderboard.length) {
+        content.innerHTML = '<div class="loading" style="padding:40px">No scores yet — be the first! 🎮</div>';
+        return;
+      }
+      const rows = data.leaderboard.map(e => {
+        const cls = e.rank <= 3 ? `rank-${e.rank}` : 'rank-other';
+        return `<tr>
+          <td><span class="rank-badge ${cls}">${e.rank}</span></td>
+          <td><strong>${escHtml(e.name)}</strong></td>
+          <td style="color:var(--green);font-weight:600">${e.score}</td>
+          <td style="color:var(--text-dim)">${e.totalQuestions}</td>
+          <td><strong style="color:var(--blue)">${e.percentage}%</strong></td>
+          <td style="color:var(--text-dim);font-size:0.8rem">${e.date}</td>
+        </tr>`;
+      }).join('');
+      content.innerHTML = `<table class="lb-table">
+        <thead><tr><th>#</th><th>Player</th><th>Score</th><th>Total Q</th><th>Accuracy</th><th>Date</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    } catch (e) {
+      content.innerHTML = '<div class="loading" style="color:var(--red)">❌ Could not reach leaderboard-service.</div>';
+    }
+  }
+
+  function escHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function showToast(msg, type = '') {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = `toast show ${type}`;
+    setTimeout(() => t.classList.remove('show'), 3000);
+  }
+</script>
+</body>
+</html>

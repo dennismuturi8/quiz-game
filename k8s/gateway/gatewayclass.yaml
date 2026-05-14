@@ -1,0 +1,23 @@
+# =============================================================================
+# GatewayClass — nginx
+# Cluster-scoped resource. Only one GatewayClass named "nginx" can exist
+# per cluster. If it is already installed (e.g. from a previous deployment),
+# skip this file.
+#
+# Check first:
+#   kubectl get gatewayclass nginx
+#   # ACCEPTED column must show "True" before the Gateway will become active.
+#
+# Implementation: Nginx Gateway Fabric v1.3.0
+# The controller is installed by Ansible (Ansible/plybk.yaml — Step 6).
+# =============================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: nginx
+  labels:
+    app.kubernetes.io/part-of: quiz-game
+    app.kubernetes.io/managed-by: argocd
+spec:
+  controllerName: gateway.nginx.org/nginx-gateway-controller
+  description: "Nginx Gateway Fabric — quiz-game"

@@ -1,0 +1,30 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: quiz-game-ingress
+  namespace: quiz-game
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target:        /
+    nginx.ingress.kubernetes.io/proxy-read-timeout:    "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout:    "60"
+    nginx.ingress.kubernetes.io/proxy-body-size:       "1m"
+    nginx.ingress.kubernetes.io/ssl-redirect:          "false"   # set "true" when TLS ready
+    nginx.ingress.kubernetes.io/use-regex:             "true"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: quiz.kbucci.local          # change to your domain/IP
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend-service
+                port:
+                  number: 80
+  # Uncomment when TLS cert is available (cert-manager or manual secret):
+  # tls:
+  #   - hosts:
+  #       - quiz.kbucci.local
+  #     secretName: quiz-tls-secret

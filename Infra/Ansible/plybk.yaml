@@ -1,0 +1,513 @@
+---
+# =============================================================================
+# plybk.yaml — Quiz Game Full Cluster Setup Playbook
+# Gateway API Edition (Nginx Gateway Fabric)
+#
+# Services deployed via ArgoCD (from k8s/ directory in the quiz-game repo):
+#   - frontend-service  (Nginx, port 80)   — quiz game UI
+#   - game-service      (Node.js, port 3001) — questions + answer checking API
+#   - leaderboard-service (Node.js, port 3002) — Redis-backed high scores
+#   - redis             (port 6379, PVC 1Gi) — leaderboard persistence
+#
+# Gateway API resources (also applied by ArgoCD from k8s/gateway/):
+#   - GatewayClass  → nginx (Nginx Gateway Fabric controller)
+#   - Gateway       → quiz-game-gateway (listeners on port 80)
+#   - HTTPRoute     → /api/game/* → game-service:3001 (path stripped)
+#                     /api/leaderboard/* → leaderboard-service:3002 (path stripped)
+#                     /* → frontend-service:80
+#
+# Traffic flow:
+#   Internet → ALB :80 → Worker NodePort 31000 → nginx-gateway → services
+#   (NodePort 31000 matches the existing ALB target group — no Terraform changes)
+#
+# All steps are idempotent — safe to re-run via ./manage.sh ansible
+# =============================================================================
+
+
+# =============================================================================
+# PLAY 1 — Label worker nodes (runs on control plane, targets workers via kubectl)
+# =============================================================================
+- name: Label Worker Nodes for Prometheus Scheduling
+  hosts: control_plane
+  become: false
+  gather_facts: false
+
+  vars:
+    kubectl: "sudo kubectl --kubeconfig /etc/kubernetes/admin.conf"
+
+  tasks:
+
+    - name: Wait for all nodes to be Ready before labelling
+      shell: |
+        {{ kubectl }} get nodes --no-headers | grep -v Ready | wc -l
+      register: not_ready
+      retries: 20
+      delay: 15
+      until: not_ready.stdout | trim == "0"
+      changed_when: false
+
+    - name: Get list of worker node names
+      shell: |
+        {{ kubectl }} get nodes --no-headers \
+          -l '!node-role.kubernetes.io/control-plane' \
+          -o custom-columns='NAME:.metadata.name' \
+          --no-headers
+      register: worker_nodes
+      changed_when: false
+
+    - name: Label worker nodes with role=worker
+      shell: |
+        {{ kubectl }} label node {{ item }} role=worker --overwrite
+      loop: "{{ worker_nodes.stdout_lines }}"
+      when: worker_nodes.stdout_lines | length > 0
+
+    - name: Confirm worker labels applied
+      command: "{{ kubectl }} get nodes --show-labels"
+      register: node_labels
+      changed_when: false
+
+    - name: Print node labels
+      debug:
+        msg: "{{ node_labels.stdout_lines }}"
+
+
+# =============================================================================
+# PLAY 2 — Bootstrap + Configure Control Plane
+# =============================================================================
+- name: Bootstrap and Configure Control Plane
+  hosts: control_plane
+  become: false
+  gather_facts: true
+
+  vars:
+    kubectl:              "sudo kubectl --kubeconfig /etc/kubernetes/admin.conf"
+    argocd_namespace:     argocd
+    gateway_namespace:    nginx-gateway
+    quiz_namespace:       quiz-game
+    monitoring_namespace: monitoring
+    gateway_api_version:  "v1.1.0"
+    nginx_gwf_version:    "v1.3.0"
+
+  tasks:
+
+    # ── 1. Wait for apt locks ─────────────────────────────────────────────────
+    - name: Wait for dpkg/apt locks to clear
+      shell: |
+        while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+          sleep 5
+        done
+        echo "locks_clear"
+      register: apt_lock_wait
+      changed_when: false
+      timeout: 300
+
+    # ── 2. apt-get update ─────────────────────────────────────────────────────
+    - name: Run apt-get update
+      become: true
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    # ── 3. Wait for Kubernetes API ────────────────────────────────────────────
+    - name: Wait for Kubernetes API to respond
+      shell: |
+        timeout 300 bash -c \
+          'until sudo kubectl --kubeconfig /etc/kubernetes/admin.conf cluster-info; \
+           do sleep 10; done'
+      register: k8s_api_wait
+      changed_when: false
+
+    - name: Print cluster info
+      debug:
+        msg: "{{ k8s_api_wait.stdout_lines[0] }}"
+
+    # ── 4. Copy kubeconfig for ubuntu user ───────────────────────────────────
+    - name: Create .kube directory
+      file:
+        path: ~/.kube
+        state: directory
+        mode: '0755'
+
+    - name: Copy admin.conf to user kubeconfig
+      shell: |
+        sudo cp /etc/kubernetes/admin.conf ~/.kube/config
+        sudo chown $(id -u):$(id -g) ~/.kube/config
+      args:
+        creates: ~/.kube/config
+
+    # ── 5. ArgoCD ─────────────────────────────────────────────────────────────
+    - name: Create ArgoCD namespace (idempotent)
+      shell: |
+        {{ kubectl }} create namespace {{ argocd_namespace }} \
+          --dry-run=client -o yaml | {{ kubectl }} apply -f -
+      changed_when: false
+
+    - name: Check if ArgoCD is already installed
+      command: "{{ kubectl }} get deployment argocd-server -n {{ argocd_namespace }}"
+      register: argocd_installed
+      ignore_errors: true
+      changed_when: false
+
+    - name: Install ArgoCD (server-side apply with force-conflicts)
+      shell: |
+        {{ kubectl }} apply \
+          --server-side \
+          --force-conflicts \
+          -n {{ argocd_namespace }} \
+          -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+      when: argocd_installed.rc != 0
+
+    - name: Wait for ArgoCD server deployment to be available
+      shell: |
+        {{ kubectl }} wait \
+          --namespace {{ argocd_namespace }} \
+          --for=condition=available \
+          deployment/argocd-server \
+          --timeout=180s
+      register: argocd_wait
+      retries: 3
+      delay: 20
+      until: argocd_wait.rc == 0
+
+    - name: Confirm ArgoCD pods
+      command: "{{ kubectl }} get pods -n {{ argocd_namespace }}"
+      register: argocd_pods
+      changed_when: false
+
+    - name: Print ArgoCD pods
+      debug:
+        msg: "{{ argocd_pods.stdout_lines }}"
+
+    # ── 6. Gateway API + Nginx Gateway Fabric ─────────────────────────────────
+    # Replaces: Nginx Ingress Controller (baremetal)
+    #
+    # The nginx-gateway service is patched to NodePort 31000/31001 — the same
+    # ports the ALB target group already expects. No Terraform changes needed.
+    #
+    # Traffic flow:
+    #   Internet → ALB :80 → Worker NodePort 31000 → nginx-gateway pod
+    #   nginx-gateway evaluates the HTTPRoute and forwards to the correct service.
+
+    - name: Install Gateway API Standard Channel CRDs
+      shell: |
+        {{ kubectl }} apply -f \
+          https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/standard-install.yaml
+      register: gw_crds_install
+      changed_when: >
+        'created' in gw_crds_install.stdout or
+        'configured' in gw_crds_install.stdout
+
+    - name: Wait for Gateway API CRDs to be established
+      shell: |
+        {{ kubectl }} wait --for=condition=Established \
+          crd/gatewayclasses.gateway.networking.k8s.io \
+          crd/gateways.gateway.networking.k8s.io \
+          crd/httproutes.gateway.networking.k8s.io \
+          --timeout=60s
+      changed_when: false
+
+    - name: Install Nginx Gateway Fabric CRDs
+      shell: |
+        {{ kubectl }} apply -f \
+          https://github.com/nginxinc/nginx-gateway-fabric/releases/download/{{ nginx_gwf_version }}/crds.yaml
+      register: ngf_crds_install
+      changed_when: >
+        'created' in ngf_crds_install.stdout or
+        'configured' in ngf_crds_install.stdout
+
+    - name: Create nginx-gateway namespace (idempotent)
+      shell: |
+        {{ kubectl }} create namespace {{ gateway_namespace }} \
+          --dry-run=client -o yaml | {{ kubectl }} apply -f -
+      changed_when: false
+
+    - name: Check if Nginx Gateway Fabric is already installed
+      command: "{{ kubectl }} get deployment nginx-gateway -n {{ gateway_namespace }}"
+      register: ngf_installed
+      ignore_errors: true
+      changed_when: false
+
+    - name: Install Nginx Gateway Fabric controller
+      shell: |
+        {{ kubectl }} apply -f \
+          https://github.com/nginxinc/nginx-gateway-fabric/releases/download/{{ nginx_gwf_version }}/nginx-gateway.yaml
+      when: ngf_installed.rc != 0
+
+    - name: Wait for Nginx Gateway Fabric to be available
+      shell: |
+        {{ kubectl }} wait \
+          --namespace {{ gateway_namespace }} \
+          --for=condition=available \
+          deployment/nginx-gateway \
+          --timeout=300s
+      register: ngf_wait
+      retries: 3
+      delay: 15
+      until: ngf_wait.rc == 0
+
+    - name: Get current nginx-gateway NodePorts
+      shell: |
+        {{ kubectl }} get svc nginx-gateway \
+          -n {{ gateway_namespace }} \
+          -o jsonpath='{.spec.ports[?(@.port==80)].nodePort},{.spec.ports[?(@.port==443)].nodePort}'
+      register: current_gw_nodeports
+      changed_when: false
+
+    - name: Patch nginx-gateway to NodePort 31000/31001 (matches ALB target group)
+      shell: |
+        {{ kubectl }} patch svc nginx-gateway \
+          -n {{ gateway_namespace }} \
+          -p '{
+            "spec": {
+              "type": "NodePort",
+              "ports": [
+                {"name": "http",  "port": 80,  "targetPort": 80,  "nodePort": 31000, "protocol": "TCP"},
+                {"name": "https", "port": 443, "targetPort": 443, "nodePort": 31001, "protocol": "TCP"}
+              ]
+            }
+          }'
+      when: current_gw_nodeports.stdout != "31000,31001"
+
+    - name: Confirm nginx-gateway service
+      command: "{{ kubectl }} get svc nginx-gateway -n {{ gateway_namespace }}"
+      register: gw_svc
+      changed_when: false
+
+    - name: Print nginx-gateway service
+      debug:
+        msg: "{{ gw_svc.stdout_lines }}"
+
+    - name: Verify GatewayClass is accepted
+      shell: |
+        {{ kubectl }} get gatewayclass nginx \
+          -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null || echo "NotFound"
+      register: gwc_status
+      changed_when: false
+
+    - name: Print GatewayClass status
+      debug:
+        msg: "GatewayClass nginx: {{ gwc_status.stdout }} (applied by ArgoCD from k8s/gateway/)"
+
+    # ── 7. Install Helm ───────────────────────────────────────────────────────
+    - name: Check if Helm is already installed
+      command: helm version --short
+      register: helm_check
+      ignore_errors: true
+      changed_when: false
+
+    - name: Download Helm install script
+      get_url:
+        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+        dest: /tmp/get_helm.sh
+        mode: '0755'
+      when: helm_check.rc != 0
+
+    - name: Install Helm
+      command: /tmp/get_helm.sh
+      when: helm_check.rc != 0
+
+    - name: Confirm Helm version
+      command: helm version --short
+      register: helm_version
+      changed_when: false
+
+    - name: Print Helm version
+      debug:
+        msg: "Helm: {{ helm_version.stdout }}"
+
+    # ── 8. kube-prometheus-stack on Worker Nodes ──────────────────────────────
+    - name: Create monitoring namespace (idempotent)
+      shell: |
+        {{ kubectl }} create namespace {{ monitoring_namespace }} \
+          --dry-run=client -o yaml | {{ kubectl }} apply -f -
+      changed_when: false
+
+    - name: Add Prometheus Community Helm repo
+      command: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+      register: repo_add
+      changed_when: "'already exists' not in repo_add.stdout"
+      ignore_errors: true
+
+    - name: Update Helm repos
+      command: helm repo update
+      changed_when: false
+
+    - name: Check if kube-prometheus-stack is already installed
+      command: helm status prometheus -n {{ monitoring_namespace }}
+      register: prometheus_installed
+      ignore_errors: true
+      changed_when: false
+
+    - name: Check for failed/stuck Helm release and clean it up
+      shell: |
+        STATUS=$(helm status prometheus -n {{ monitoring_namespace }} \
+          -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['status'])" 2>/dev/null || echo "notfound")
+        if [ "$STATUS" = "failed" ] || [ "$STATUS" = "pending-install" ]; then
+          helm uninstall prometheus -n {{ monitoring_namespace }} || true
+          echo "cleaned"
+        else
+          echo "ok"
+        fi
+      register: helm_cleanup
+      changed_when: "'cleaned' in helm_cleanup.stdout"
+
+    - name: Install kube-prometheus-stack pinned to worker nodes
+      shell: |
+        helm install prometheus prometheus-community/kube-prometheus-stack \
+          --namespace {{ monitoring_namespace }} \
+          --set grafana.nodeSelector.role=worker \
+          --set prometheus.prometheusSpec.nodeSelector.role=worker \
+          --set alertmanager.alertmanagerSpec.nodeSelector.role=worker \
+          --set prometheusOperator.nodeSelector.role=worker \
+          --set kube-state-metrics.nodeSelector.role=worker \
+          --set prometheus-node-exporter.nodeSelector.role=worker \
+          --set grafana.adminPassword=admin \
+          --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+          --set alertmanager.enabled=true \
+          --timeout 10m
+      when: prometheus_installed.rc != 0 or "'cleaned' in helm_cleanup.stdout"
+
+    - name: Wait for Prometheus operator to be ready (retries every 30s for 10 min)
+      shell: |
+        {{ kubectl }} wait \
+          --namespace {{ monitoring_namespace }} \
+          --for=condition=available \
+          deployment/prometheus-kube-prometheus-operator \
+          --timeout=30s
+      register: operator_wait
+      retries: 20
+      delay: 30
+      until: operator_wait.rc == 0
+      changed_when: false
+
+    - name: Wait for Grafana to be ready (retries every 30s for 10 min)
+      shell: |
+        {{ kubectl }} wait \
+          --namespace {{ monitoring_namespace }} \
+          --for=condition=available \
+          deployment/prometheus-grafana \
+          --timeout=30s
+      register: grafana_wait
+      retries: 20
+      delay: 30
+      until: grafana_wait.rc == 0
+      changed_when: false
+
+    - name: Confirm monitoring pods and which nodes they landed on
+      shell: |
+        {{ kubectl }} get pods -n {{ monitoring_namespace }} \
+          -o wide --no-headers | awk '{print $1, $3, $7}'
+      register: monitoring_pods
+      changed_when: false
+
+    - name: Print monitoring pod placement
+      debug:
+        msg: "{{ monitoring_pods.stdout_lines }}"
+
+    # ── 9. Create Quiz Game Namespace ─────────────────────────────────────────
+    - name: Create quiz-game namespace (idempotent)
+      shell: |
+        {{ kubectl }} create namespace {{ quiz_namespace }} \
+          --dry-run=client -o yaml | {{ kubectl }} apply -f -
+      changed_when: false
+
+    # ── 10. Apply ArgoCD App Manifest ─────────────────────────────────────────
+    # ArgoCD syncs the entire k8s/ directory from the quiz-game GitHub repo.
+    # This deploys:
+    #   k8s/namespace.yaml            → quiz-game namespace labels
+    #   k8s/secrets.yaml              → quiz-secrets (admin-key)
+    #   k8s/redis/                    → Redis deployment + PVC + service
+    #   k8s/game-service/             → Deployment + ClusterIP :3001 + HPA
+    #   k8s/leaderboard-service/      → Deployment + ClusterIP :3002 + HPA
+    #   k8s/frontend-service/         → Deployment + ClusterIP :80
+    #   k8s/gateway/gatewayclass.yaml → GatewayClass nginx
+    #   k8s/gateway/gateway.yaml      → quiz-game-gateway (port 80)
+    #   k8s/gateway/httproute.yaml    → path routing + URL rewrite rules
+    - name: Apply ArgoCD app manifest from GitHub (registers quiz-game with ArgoCD)
+      shell: |
+        {{ kubectl }} apply -f \
+          https://raw.githubusercontent.com/YOUR_GH_USER/quiz-game/main/argocd/app.yaml
+      register: argocd_apply
+      # ↑ Replace YOUR_GH_USER with your actual GitHub username before running.
+
+    - name: Print ArgoCD apply output
+      debug:
+        msg: "{{ argocd_apply.stdout_lines }}"
+
+    # ── 11. Retrieve Passwords ────────────────────────────────────────────────
+    - name: Get ArgoCD admin password
+      shell: |
+        {{ kubectl }} get secret argocd-initial-admin-secret \
+          -n {{ argocd_namespace }} \
+          -o jsonpath="{.data.password}" | base64 --decode && echo
+      register: argocd_password
+      changed_when: false
+
+    - name: Get Grafana admin password
+      shell: |
+        {{ kubectl }} get secret prometheus-grafana \
+          -n {{ monitoring_namespace }} \
+          -o jsonpath="{.data.admin-password}" | base64 --decode && echo
+      register: grafana_password
+      changed_when: false
+
+    # ── 12. Final Summary ─────────────────────────────────────────────────────
+    - name: Print full access summary
+      debug:
+        msg:
+          - "========================================================"
+          - " ✅  Quiz Game Cluster Setup Complete! (Gateway API)"
+          - "========================================================"
+          - ""
+          - "── Traffic Flow ────────────────────────────────────────"
+          - "  Internet → ALB :80 → NodePort 31000 → nginx-gateway"
+          - "  /api/game/*        → game-service:3001   (path stripped)"
+          - "  /api/leaderboard/* → leaderboard-service:3002 (path stripped)"
+          - "  /*                 → frontend-service:80"
+          - ""
+          - "── ArgoCD ──────────────────────────────────────────────"
+          - "  Username : admin"
+          - "  Password : {{ argocd_password.stdout }}"
+          - "  Access   : ./manage.sh proxy → https://argocd-server.argocd.svc.cluster.local"
+          - "  Or       : kubectl port-forward svc/argocd-server -n argocd 8080:443"
+          - "             then open https://localhost:8080"
+          - ""
+          - "── Grafana ─────────────────────────────────────────────"
+          - "  Username : admin"
+          - "  Password : {{ grafana_password.stdout }}"
+          - "  Runs on  : Worker nodes (nodeSelector: role=worker)"
+          - "  Access   : ./manage.sh proxy → http://prometheus-grafana.monitoring:80"
+          - "  Or       : kubectl port-forward svc/prometheus-grafana -n monitoring 3000:80"
+          - "             then open http://localhost:3000"
+          - ""
+          - "── Prometheus ──────────────────────────────────────────"
+          - "  Runs on  : Worker nodes (nodeSelector: role=worker)"
+          - "  Access   : kubectl port-forward svc/prometheus-kube-prometheus-prometheus -n monitoring 9091:9090"
+          - "             then open http://localhost:9091"
+          - ""
+          - "── Alertmanager ────────────────────────────────────────"
+          - "  Runs on  : Worker nodes (nodeSelector: role=worker)"
+          - "  Access   : kubectl port-forward svc/prometheus-kube-prometheus-alertmanager -n monitoring 9093:9093"
+          - "             then open http://localhost:9093"
+          - ""
+          - "── Gateway API ─────────────────────────────────────────"
+          - "  Controller : nginx-gateway pod in nginx-gateway namespace"
+          - "  NodePort   : 31000 (HTTP) / 31001 (HTTPS)"
+          - "  GatewayClass / Gateway / HTTPRoute applied by ArgoCD"
+          - "  Check      : ./manage.sh gateway-status"
+          - ""
+          - "── Quiz Game Services (port-forward or SOCKS proxy) ────"
+          - "  Game API      : kubectl port-forward svc/game-service -n quiz-game 3001:3001"
+          - "                  → http://localhost:3001/health"
+          - "                  → http://localhost:3001/questions/random?count=10"
+          - "  Leaderboard   : kubectl port-forward svc/leaderboard-service -n quiz-game 3002:3002"
+          - "                  → http://localhost:3002/leaderboard"
+          - "  Frontend      : kubectl port-forward svc/frontend-service -n quiz-game 8080:80"
+          - "                  → http://localhost:8080"
+          - "  Redis CLI     : kubectl exec -it deploy/redis -n quiz-game -- redis-cli"
+          - ""
+          - "── App URL ─────────────────────────────────────────────"
+          - "  Run     : ./manage.sh urls"
+          - "  Or add to /etc/hosts: <ALB_IP>  quiz.kbucci.local"
+          - "  Then open: http://quiz.kbucci.local"
+          - "========================================================"
