@@ -2,3 +2,20 @@
 node_modules/
 *.log
 .DS_Store
+
+
+# Local terraform directory
+**/.terraform/*
+
+# .tfstate files
+terraform.tfstate
+terraform.tfstate.backup
+
+# Crash log files
+crash.log
+
+# Variables files
+terraform.tfvars
+terraform.tfvars.json
+
+.terraform.lock.hcl
