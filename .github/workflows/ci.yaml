@@ -8,6 +8,11 @@ on:
 
 env:
   DOCKER_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKER_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+  GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
+  GIT_EMAIL: ${{ secrets.GIT_EMAIL }}
+  GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
 
 jobs:
   detect-changes:
@@ -61,7 +66,7 @@ jobs:
       - uses: actions/checkout@v4
         if: matrix.changed == 'true'
         with:
-          token: ${{ secrets.GH_PAT }}
+          token: ${{ secrets.GIT_TOKEN }}
 
       - uses: docker/setup-buildx-action@v3
         if: matrix.changed == 'true'
@@ -79,7 +84,7 @@ jobs:
           context:    ${{ matrix.context }}
           load:       true
           push:       false
-          tags:       ${{ env.DOCKER_USER }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}
+          tags:       ${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to:   type=gha,mode=max,scope=${{ matrix.service }}
 
@@ -88,7 +93,7 @@ jobs:
         if: matrix.changed == 'true'
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref:      "${{ env.DOCKER_USER }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}"
+          image-ref:      "${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}"
           format:         table
           exit-code:      "0"
           severity:       CRITICAL,HIGH
@@ -100,7 +105,7 @@ jobs:
         if: matrix.changed == 'true'
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref:      "${{ env.DOCKER_USER }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}"
+          image-ref:      "${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}"
           format:         sarif
           output:         trivy-${{ matrix.service }}.sarif
           severity:       CRITICAL,HIGH
@@ -119,7 +124,7 @@ jobs:
         if: matrix.changed == 'true'
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref:      "${{ env.DOCKER_USER }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}"
+          image-ref:      "${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}"
           format:         table
           exit-code:      "1"
           severity:       CRITICAL
@@ -141,8 +146,8 @@ jobs:
           context:    ${{ matrix.context }}
           push:       true
           tags: |
-            ${{ env.DOCKER_USER }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}
-            ${{ env.DOCKER_USER }}/${{ matrix.image_name }}:latest
+            ${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}
+            ${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:latest
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to:   type=gha,mode=max,scope=${{ matrix.service }}
 
@@ -150,7 +155,7 @@ jobs:
       - name: Update image tag in manifest
         if: matrix.changed == 'true'
         run: |
-          sed -i "s|image:.*${{ matrix.image_name }}:.*|image: ${{ env.DOCKER_USER }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}|g" \
+          sed -i "s|image:.*${{ matrix.image_name }}:.*|image: ${{ env.DOCKER_USERNAME }}/${{ matrix.image_name }}:${{ steps.tag.outputs.TAG }}|g" \
             ${{ matrix.manifest }}
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
