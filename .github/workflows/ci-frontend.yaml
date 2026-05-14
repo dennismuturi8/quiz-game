@@ -1,0 +1,86 @@
+---
+name: Build and Scan Frontend Service
+
+on:
+  push:
+    branches: [ 'main' ]
+    paths:
+      - 'frontend-service/**'
+      - '.github/workflows/ci-frontend.yaml'
+  pull_request:
+    branches: [ 'main' ]
+    paths:
+      - 'frontend-service/**'
+
+env:
+  APP_NAME: frontend-app
+  DOCKER_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKER_PASSWORD: ${{ secrets.DOCKERHUB_TOKEN }}
+  GIT_USERNAME: ${{ secrets.GIT_USERNAME }}
+  GIT_EMAIL: ${{ secrets.GIT_EMAIL }}
+  GIT_TOKEN: ${{ secrets.GIT_TOKEN }}
+
+jobs:
+ call-docker-build:
+    name: Result Call Docker Build
+    uses: dockersamples/.github/.github/workflows/reusable-docker-build.yaml@main
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: write
+      security-events: write 
+    secrets:
+      dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+      dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+    with:
+      dockerhub-enable: true
+      ghcr-enable: true
+      image-names: |
+        ghcr.io/${{ github.repository_owner }}/frontend-app
+        # Reference a variable here, NOT a secret
+        ${{ vars.DOCKERHUB_USERNAME }}/frontend-app
+      tag-rules: |
+        type=sha,format=long,prefix=sha-
+        type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+      context: frontend-service
+     
+     
+ trivy-scan:
+    needs: call-docker-build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'ghcr.io/${{ github.repository_owner }}/frontend-app:sha-${{ github.sha }}'
+          format: 'table'
+          severity: 'CRITICAL,HIGH'
+
+ update-gitops:
+    needs: [call-docker-build, trivy-scan]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GIT_TOKEN }}
+
+      - name: Update Image Tag
+        run: |
+           sed -i "s|image: ${{ env.DOCKERHUB_USERNAME }}/${{ env.APP_NAME }}:.*|image: ${{ env.DOCKERHUB_USERNAME }}/${{ env.APP_NAME }}:${{ github.sha }}|g" k8s/frontend-service/deployment.yaml
+
+      - name: Commit and Push
+        run: |
+          git config --global user.name "GitOps Bot"
+          git config --global user.email "actions@github.com"
+          git add k8s/frontend-service/deployment.yaml
+          
+          # Check if there are staged changes
+          if git diff --cached --quiet; then
+            echo "No changes to commit. Skipping..."
+          else
+            git commit -m "chore(gitops): update frontend service to sha-${{ github.sha }} [skip ci]"
+            git push
+          fi
+
