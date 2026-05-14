@@ -1,37 +1,129 @@
+---
+# App 1 — Frontend-service (Deployment + Service)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: quiz-game
-  namespace: argocd
-  labels:
-    team: kbucci
+  name: frontend-app
+  namespace: quiz-game
   finalizers:
-    - resources-finalizer.argocd.argoproj.io
+  - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
-    repoURL:        https://github.com/dennismuturi8/quiz-game.git
+    repoURL: https://github.com/dennismuturi8/quiz-game.git
     targetRevision: main
-    path:           k8s
+    path: k8s/frontend-service
   destination:
-    server:    https://kubernetes.default.svc
+    server: https://kubernetes.default.svc
     namespace: quiz-game
   syncPolicy:
     automated:
-      prune:    true
+      prune: true
       selfHeal: true
     syncOptions:
-      - CreateNamespace=true
-      - ApplyOutOfSyncOnly=true
-      - PrunePropagationPolicy=foreground
-    retry:
-      limit: 5
-      backoff:
-        duration:    5s
-        factor:      2
-        maxDuration: 3m
-  ignoreDifferences:
-    - group: apps
-      kind:  Deployment
-      jsonPointers:
-        - /spec/replicas
+    - CreateNamespace=true
+    - ServerSideApply=true
+
+---
+# App 2 — Game-service (Deployment + Service)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: game-app
+  namespace: quiz-game
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/dennismuturi8/quiz-game.git
+    targetRevision: main
+    path: k8s/game-service
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: quiz-game
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true
+
+---
+# App 3 — Leaderboard-service (Deployment + Service)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: leaderboard-app
+  namespace: quiz-game
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/dennismuturi8/quiz-game.git
+    targetRevision: main
+    path: k8s/leaderboard-service
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: quiz-game
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true
+
+---
+# App 4 — Redis (in-memory vote queue)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: redis-app
+  namespace: quiz-game
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/dennismuturi8/quiz-game.git
+    targetRevision: main
+    path: k8s/redis
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: quiz-game
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true
+
+---
+# App 5 — Gateway (gateway, gatewayclass, httproute)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gateway-app
+  namespace: quiz-game
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/dennismuturi8/quiz-game.git
+    targetRevision: main
+    path: k8s/gateway
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: quiz-game
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true
