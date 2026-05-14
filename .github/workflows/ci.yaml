@@ -43,7 +43,7 @@ jobs:
         type=sha,format=long,prefix=sha-
         type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
       context: frontend-service
-      dockerfile: frontend-service/Dockerfile
+     
      
  trivy-scan:
     needs: call-docker-build
@@ -129,7 +129,7 @@ jobs:
         type=sha,format=long,prefix=sha-
         type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
       context: game-service
-      dockerfile: game-service/Dockerfile
+    
      
  trivy-scan:
     needs: call-docker-build
@@ -215,7 +215,7 @@ jobs:
         type=sha,format=long,prefix=sha-
         type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
       context: leaderboard-service
-      dockerfile: leaderboard-service/Dockerfile
+     
      
  trivy-scan:
     needs: call-docker-build
