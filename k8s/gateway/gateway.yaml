@@ -10,7 +10,7 @@
 # hostname/IP to build the nip.io URL: http://quiz.<ALB_IP>.nip.io
 #
 # Verify after apply:
-#   kubectl get gateway quiz-game-gateway -n quiz-game
+#   kubectl get gateway quiz-game-gateway -n nginx-gateway
 #   # ADDRESS column must be populated before the HTTPRoute works.
 #   kubectl describe gateway quiz-game-gateway -n quiz-game
 #   # PROGRAMMED condition must be True.
@@ -19,7 +19,7 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: quiz-game-gateway
-  namespace: quiz-game
+  namespace: nginx-gateway
   labels:
     app.kubernetes.io/part-of: quiz-game
     app.kubernetes.io/managed-by: argocd
@@ -30,16 +30,16 @@ spec:
   gatewayClassName: nginx
 
   listeners:
-    # ── Single HTTP listener for the quiz game ────────────────────────────────
+    # ── Single HTTP listener for the quiz game ───────────────────────────────
     # All requests for quiz.kbucci.local arrive here and are forwarded to
     # the HTTPRoute below which splits them by path prefix.
     - name: quiz-http
       protocol: HTTP
       port: 80
-      hostname: "quiz.kbucci.local"
+      hostname: "*.nip.io"
       allowedRoutes:
         namespaces:
-          from: Same    # only the quiz-game namespace can attach HTTPRoutes
+          from: All    
 
     # ── HTTPS listener (uncomment when TLS certificate is available) ──────────
     # - name: quiz-https
