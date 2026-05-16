@@ -37,7 +37,7 @@ spec:
   parentRefs:
     - name:        quiz-game-gateway
       namespace:   nginx-gateway
-      sectionName: quiz-http
+      sectionName: http
 
   # Hostname must match the Gateway listener hostname
   hostnames:
