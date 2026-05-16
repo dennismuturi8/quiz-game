@@ -108,7 +108,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: gateway-app
-  namespace: quiz-game
+  namespace: nginx-gateway
   finalizers:
   - resources-finalizer.argocd.argoproj.io
 spec:
