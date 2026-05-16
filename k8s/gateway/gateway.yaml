@@ -33,7 +33,7 @@ spec:
     # ── Single HTTP listener for the quiz game ───────────────────────────────
     # All requests for quiz.kbucci.local arrive here and are forwarded to
     # the HTTPRoute below which splits them by path prefix.
-    - name: quiz-http
+    - name: http
       protocol: HTTP
       port: 80
       hostname: "*.nip.io"
