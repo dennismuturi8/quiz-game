@@ -103,7 +103,7 @@ spec:
     - ServerSideApply=true
 
 ---
-# App 5 — Gateway (gateway, gatewayclass, httproute)
+# App 5 — Gateway (gateway)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
@@ -116,10 +116,87 @@ spec:
   source:
     repoURL: https://github.com/dennismuturi8/quiz-game.git
     targetRevision: main
-    path: k8s/gateway/
+    path: k8s/gateway/gateway.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: nginx-gateway
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true
+---
+# App 6 — GatewayClass (gatewayclass)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gatewayclass-app
+  namespace: nginx-gateway
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/dennismuturi8/quiz-game.git
+    targetRevision: main
+    path: k8s/gateway/gatewayclass.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: nginx-gateway
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true
+
+---
+# App 7 - HTTPRoute (httproute)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: httproute-app
+  namespace: nginx-gateway
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/dennismuturi8/quiz-game.git
+    targetRevision: main
+    path: k8s/gateway/httproute.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: nginx-gateway
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - ServerSideApply=true
+
+---
+# App 8 - MetalLB (IPAddressPool + L2Advertisement)
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: metallb-app
+  namespace: metallb-system
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/dennismuturi8/quiz-game.git
+    targetRevision: main
+    path: k8s/metallb/metallb-config.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: metallb-system
   syncPolicy:
     automated:
       prune: true
