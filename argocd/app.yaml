@@ -116,10 +116,10 @@ spec:
   source:
     repoURL: https://github.com/dennismuturi8/quiz-game.git
     targetRevision: main
-    path: k8s/gateway
+    path: k8s/gateway/
   destination:
     server: https://kubernetes.default.svc
-    namespace: quiz-game
+    namespace: nginx-gateway
   syncPolicy:
     automated:
       prune: true
