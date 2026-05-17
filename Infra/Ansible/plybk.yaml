@@ -1,53 +1,61 @@
----
 # =============================================================================
 # plybk.yaml — Quiz Game Full Cluster Setup Playbook
-# Gateway API Edition (Nginx Gateway Fabric)
+# Gateway API Edition — Nginx Gateway Fabric v2.5.1
 #
-# Services deployed via ArgoCD (from k8s/ directory in the quiz-game repo):
-#   - frontend-service  (Nginx, port 80)   — quiz game UI
-#   - game-service      (Node.js, port 3001) — questions + answer checking API
-#   - leaderboard-service (Node.js, port 3002) — Redis-backed high scores
-#   - redis             (port 6379, PVC 1Gi) — leaderboard persistence
+# Usage:
+#   Full run   : ./manage.sh ansible
+#   Single tag : ansible-playbook -i inventory.ini plybk.yaml --tags prometheus
 #
-# Gateway API resources (also applied by ArgoCD from k8s/gateway/):
-#   - GatewayClass  → nginx (Nginx Gateway Fabric controller)
-#   - Gateway       → quiz-game-gateway (listeners on port 80)
-#   - HTTPRoute     → /api/game/* → game-service:3001 (path stripped)
-#                     /api/leaderboard/* → leaderboard-service:3002 (path stripped)
-#                     /* → frontend-service:80
+# Available tags:
+#   preflight, kubeconfig, argocd, metallb, gateway-api, helm,
+#   prometheus, quiz-game, argocd-app, summary
 #
-# Traffic flow:
-#   Internet → ALB :80 → Worker NodePort 31000 → nginx-gateway → services
-#   (NodePort 31000 matches the existing ALB target group — no Terraform changes)
+# Traffic path (external):
+#   Internet → ALB :80 → EC2 worker:31000 → quiz-game-gateway-nginx → backends
+#   Access via: http://quiz.<ALB_IP>.nip.io  (gateway listener requires *.nip.io)
 #
-# All steps are idempotent — safe to re-run via ./manage.sh ansible
+# Monitoring (via gateway):
+#   http://quiz.<ALB_IP>.nip.io/grafana
+#   http://quiz.<ALB_IP>.nip.io/prometheus
+#   http://quiz.<ALB_IP>.nip.io/alertmanager
+#
+# Key architecture notes:
+#   - NGF v2.5.1 provisions quiz-game-gateway-nginx (data plane) per Gateway.
+#     The ALB NodePort must be set on this service, NOT on nginx-gateway (controller).
+#   - All ArgoCD Application resources must be in the argocd namespace.
+#   - MetalLB pool is named kbucci-pool (matches gateway.yaml annotation).
+#   - Gateway listener hostname is *.nip.io — monitoring HTTPRoute must match.
+#   - ArgoCD runs on worker nodes; dex is disabled (not needed for local admin).
+#
+# All tasks are idempotent — safe to re-run at any time.
 # =============================================================================
 
 
 # =============================================================================
-# PLAY 1 — Label worker nodes (runs on control plane, targets workers via kubectl)
+# PLAY 1 — Label worker nodes
 # =============================================================================
-- name: Label Worker Nodes for Prometheus Scheduling
+- name: Label Worker Nodes for Prometheus Node Scheduling
   hosts: control_plane
   become: false
   gather_facts: false
+  tags: [preflight]
 
   vars:
     kubectl: "sudo kubectl --kubeconfig /etc/kubernetes/admin.conf"
 
   tasks:
 
-    - name: Wait for all nodes to be Ready before labelling
-      shell: |
-        {{ kubectl }} get nodes --no-headers | grep -v Ready | wc -l
+    - name: Wait for all nodes to be Ready
+      ansible.builtin.shell: |
+        {{ kubectl }} get nodes --no-headers | grep -v " Ready" | wc -l
       register: not_ready
-      retries: 20
+      retries: 30
       delay: 15
       until: not_ready.stdout | trim == "0"
       changed_when: false
 
-    - name: Get list of worker node names
-      shell: |
+    - name: Get worker node names
+      ansible.builtin.shell: |
         {{ kubectl }} get nodes --no-headers \
           -l '!node-role.kubernetes.io/control-plane' \
           -o custom-columns='NAME:.metadata.name' \
@@ -55,26 +63,27 @@
       register: worker_nodes
       changed_when: false
 
-    - name: Label worker nodes with role=worker
-      shell: |
+    - name: Label worker nodes role=worker
+      ansible.builtin.shell: |
         {{ kubectl }} label node {{ item }} role=worker --overwrite
       loop: "{{ worker_nodes.stdout_lines }}"
       when: worker_nodes.stdout_lines | length > 0
+      changed_when: true
 
-    - name: Confirm worker labels applied
-      command: "{{ kubectl }} get nodes --show-labels"
+    - name: Confirm node labels
+      ansible.builtin.command: "{{ kubectl }} get nodes --show-labels"
       register: node_labels
       changed_when: false
 
     - name: Print node labels
-      debug:
+      ansible.builtin.debug:
         msg: "{{ node_labels.stdout_lines }}"
 
 
 # =============================================================================
-# PLAY 2 — Bootstrap + Configure Control Plane
+# PLAY 2 — Configure control plane
 # =============================================================================
-- name: Bootstrap and Configure Control Plane
+- name: Configure Control Plane — Full Stack Install
   hosts: control_plane
   become: false
   gather_facts: true
@@ -82,277 +91,492 @@
   vars:
     kubectl:              "sudo kubectl --kubeconfig /etc/kubernetes/admin.conf"
     argocd_namespace:     argocd
+    metallb_namespace:    metallb-system
     gateway_namespace:    nginx-gateway
     quiz_namespace:       quiz-game
     monitoring_namespace: monitoring
     gateway_api_version:  "v1.1.0"
-    nginx_gwf_version:    "v1.3.0"
+    nginx_gwf_version:    "v2.5.1"
+    # MetalLB pool name — MUST match the annotation in k8s/gateway/gateway.yaml
+    # (metallb.universe.tf/address-pool: kbucci-pool)
+    metallb_pool_name:    "kbucci-pool"
+    metallb_ip_range:     "192.168.1.200-192.168.1.220"
+    # ALB NodePort — must match the Terraform ALB target group port.
+    # Patched onto quiz-game-gateway-nginx (data plane), NOT nginx-gateway (controller).
+    alb_node_port:        31000
+    # Gateway resource name and listener — from k8s/gateway/gateway.yaml
+    gateway_name:         "quiz-game-gateway"
+    gateway_listener:     "http"
+    # nip.io hostname pattern matching the gateway listener hostname filter
+    gateway_hostname:     "*.nip.io"
+    # Path to k8s/ relative to this playbook's parent directory
+    k8s_manifests_dir:    "{{ playbook_dir | dirname }}/k8s"
+
+  pre_tasks:
+
+    - name: "[Preflight] Verify kubectl can reach the cluster"
+      ansible.builtin.shell: |
+        {{ kubectl }} cluster-info --request-timeout=10s
+      register: preflight_kubectl
+      changed_when: false
+      failed_when: preflight_kubectl.rc != 0
+      tags: [preflight]
+
+    - name: "[Preflight] Print cluster info"
+      ansible.builtin.debug:
+        msg: "{{ preflight_kubectl.stdout_lines[0] }}"
+      tags: [preflight]
+
+    - name: "[Preflight] Confirm all nodes are Ready"
+      ansible.builtin.shell: |
+        {{ kubectl }} get nodes --no-headers
+      register: preflight_nodes
+      changed_when: false
+      tags: [preflight]
+
+    - name: "[Preflight] Print node status"
+      ansible.builtin.debug:
+        msg: "{{ preflight_nodes.stdout_lines }}"
+      tags: [preflight]
 
   tasks:
 
-    # ── 1. Wait for apt locks ─────────────────────────────────────────────────
-    - name: Wait for dpkg/apt locks to clear
-      shell: |
+    # ── 1. System preparation ─────────────────────────────────────────────────
+    - name: "[1/9] Wait for dpkg locks to clear"
+      ansible.builtin.shell: |
         while sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
           sleep 5
         done
-        echo "locks_clear"
-      register: apt_lock_wait
       changed_when: false
       timeout: 300
+      tags: [preflight]
 
-    # ── 2. apt-get update ─────────────────────────────────────────────────────
-    - name: Run apt-get update
-      become: true
-      apt:
-        update_cache: yes
+    - name: "[1/9] Run apt-get update"
+      ansible.builtin.apt:
+        update_cache: true
         cache_valid_time: 3600
+      become: true
+      tags: [preflight]
 
-    # ── 3. Wait for Kubernetes API ────────────────────────────────────────────
-    - name: Wait for Kubernetes API to respond
-      shell: |
-        timeout 300 bash -c \
-          'until sudo kubectl --kubeconfig /etc/kubernetes/admin.conf cluster-info; \
-           do sleep 10; done'
-      register: k8s_api_wait
-      changed_when: false
-
-    - name: Print cluster info
-      debug:
-        msg: "{{ k8s_api_wait.stdout_lines[0] }}"
-
-    # ── 4. Copy kubeconfig for ubuntu user ───────────────────────────────────
-    - name: Create .kube directory
-      file:
-        path: ~/.kube
+    # ── 2. Kubeconfig ─────────────────────────────────────────────────────────
+    - name: "[2/9] Ensure ~/.kube directory exists"
+      ansible.builtin.file:
+        path: "~/.kube"
         state: directory
-        mode: '0755'
+        mode: "0755"
+      tags: [kubeconfig]
 
-    - name: Copy admin.conf to user kubeconfig
-      shell: |
-        sudo cp /etc/kubernetes/admin.conf ~/.kube/config
+    - name: "[2/9] Copy admin.conf → ~/.kube/config"
+      ansible.builtin.shell: |
+        sudo cp -f /etc/kubernetes/admin.conf ~/.kube/config
         sudo chown $(id -u):$(id -g) ~/.kube/config
-      args:
-        creates: ~/.kube/config
+        chmod 600 ~/.kube/config
+      changed_when: true
+      tags: [kubeconfig]
 
-    # ── 5. ArgoCD ─────────────────────────────────────────────────────────────
-    - name: Create ArgoCD namespace (idempotent)
-      shell: |
+    - name: "[2/9] Verify kubeconfig works without sudo"
+      ansible.builtin.command: kubectl cluster-info
+      register: kubeconfig_check
+      changed_when: false
+      tags: [kubeconfig]
+
+    - name: "[2/9] Print kubeconfig check"
+      ansible.builtin.debug:
+        msg: "{{ kubeconfig_check.stdout_lines[0] }}"
+      tags: [kubeconfig]
+
+    # ── 3. ArgoCD ─────────────────────────────────────────────────────────────
+    - name: "[3/9] Create argocd namespace"
+      ansible.builtin.shell: |
         {{ kubectl }} create namespace {{ argocd_namespace }} \
           --dry-run=client -o yaml | {{ kubectl }} apply -f -
-      changed_when: false
+      register: argocd_ns_result
+      changed_when: >
+        'created' in argocd_ns_result.stdout or
+        'configured' in argocd_ns_result.stdout
+      tags: [argocd]
 
-    - name: Check if ArgoCD is already installed
-      command: "{{ kubectl }} get deployment argocd-server -n {{ argocd_namespace }}"
+    - name: "[3/9] Check if ArgoCD is already installed"
+      ansible.builtin.command: >
+        {{ kubectl }} get deployment argocd-server -n {{ argocd_namespace }}
       register: argocd_installed
       ignore_errors: true
       changed_when: false
+      tags: [argocd]
 
-    - name: Install ArgoCD (server-side apply with force-conflicts)
-      shell: |
+    - name: "[3/9] Install ArgoCD"
+      ansible.builtin.shell: |
         {{ kubectl }} apply \
           --server-side \
           --force-conflicts \
           -n {{ argocd_namespace }} \
           -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
       when: argocd_installed.rc != 0
+      register: argocd_install_result
+      changed_when: >
+        'created' in argocd_install_result.stdout or
+        'configured' in argocd_install_result.stdout
+      tags: [argocd]
 
-    - name: Wait for ArgoCD server deployment to be available
-      shell: |
-        {{ kubectl }} wait \
-          --namespace {{ argocd_namespace }} \
+    - name: "[3/9] Wait for ArgoCD server initial rollout"
+      ansible.builtin.shell: |
+        {{ kubectl }} wait deployment/argocd-server \
+          -n {{ argocd_namespace }} \
           --for=condition=available \
-          deployment/argocd-server \
-          --timeout=180s
+          --timeout=30s
       register: argocd_wait
-      retries: 3
-      delay: 20
+      retries: 12
+      delay: 15
       until: argocd_wait.rc == 0
+      changed_when: false
+      tags: [argocd]
 
-    - name: Confirm ArgoCD pods
-      command: "{{ kubectl }} get pods -n {{ argocd_namespace }}"
+    # Move ArgoCD components to worker nodes to prevent control-plane evictions.
+    # The upstream install.yaml sets no nodeSelector, so pods land wherever the
+    # scheduler places them. On an 8GB node running the full stack this causes
+    # OOM evictions. Worker nodes have more headroom.
+    - name: "[3/9] Move ArgoCD server to worker nodes"
+      ansible.builtin.shell: |
+        {{ kubectl }} patch deployment/argocd-server \
+          -n {{ argocd_namespace }} \
+          --type=json \
+          -p='[{"op":"add","path":"/spec/template/spec/nodeSelector","value":{"role":"worker"}}]'
+      changed_when: true
+      tags: [argocd]
+
+    - name: "[3/9] Move ArgoCD repo-server to worker nodes"
+      ansible.builtin.shell: |
+        {{ kubectl }} patch deployment/argocd-repo-server \
+          -n {{ argocd_namespace }} \
+          --type=json \
+          -p='[{"op":"add","path":"/spec/template/spec/nodeSelector","value":{"role":"worker"}}]'
+      changed_when: true
+      tags: [argocd]
+
+    - name: "[3/9] Move ArgoCD applicationset-controller to worker nodes"
+      ansible.builtin.shell: |
+        {{ kubectl }} patch deployment/argocd-applicationset-controller \
+          -n {{ argocd_namespace }} \
+          --type=json \
+          -p='[{"op":"add","path":"/spec/template/spec/nodeSelector","value":{"role":"worker"}}]'
+      changed_when: true
+      tags: [argocd]
+
+    - name: "[3/9] Move ArgoCD notifications-controller to worker nodes"
+      ansible.builtin.shell: |
+        {{ kubectl }} patch deployment/argocd-notifications-controller \
+          -n {{ argocd_namespace }} \
+          --type=json \
+          -p='[{"op":"add","path":"/spec/template/spec/nodeSelector","value":{"role":"worker"}}]'
+      changed_when: true
+      tags: [argocd]
+
+    - name: "[3/9] Move ArgoCD redis to worker nodes"
+      ansible.builtin.shell: |
+        {{ kubectl }} patch deployment/argocd-redis \
+          -n {{ argocd_namespace }} \
+          --type=json \
+          -p='[{"op":"add","path":"/spec/template/spec/nodeSelector","value":{"role":"worker"}}]'
+      changed_when: true
+      tags: [argocd]
+
+    # Dex is ArgoCD's OIDC/SSO server. It is not needed for local admin login
+    # and is the largest memory consumer in the ArgoCD namespace. Disabling it
+    # frees ~200MB per worker node and eliminates the dex eviction cascade.
+    - name: "[3/9] Disable argocd-dex-server (SSO not required)"
+      ansible.builtin.shell: |
+        {{ kubectl }} scale deployment argocd-dex-server \
+          -n {{ argocd_namespace }} --replicas=0
+      changed_when: true
+      tags: [argocd]
+
+    - name: "[3/9] Clean up any Evicted/Failed ArgoCD pods"
+      ansible.builtin.shell: |
+        {{ kubectl }} get pods -n {{ argocd_namespace }} \
+          --field-selector=status.phase==Failed \
+          -o name 2>/dev/null \
+          | xargs {{ kubectl }} delete -n {{ argocd_namespace }} 2>/dev/null || true
+      changed_when: false
+      tags: [argocd]
+
+    - name: "[3/9] Wait for ArgoCD repo-server on worker nodes"
+      ansible.builtin.shell: |
+        {{ kubectl }} rollout status deployment/argocd-repo-server \
+          -n {{ argocd_namespace }} --timeout=30s
+      register: repo_server_wait
+      retries: 12
+      delay: 15
+      until: repo_server_wait.rc == 0
+      changed_when: false
+      tags: [argocd]
+
+    - name: "[3/9] Wait for ArgoCD server on worker nodes"
+      ansible.builtin.shell: |
+        {{ kubectl }} rollout status deployment/argocd-server \
+          -n {{ argocd_namespace }} --timeout=30s
+      register: argocd_server_wait
+      retries: 12
+      delay: 15
+      until: argocd_server_wait.rc == 0
+      changed_when: false
+      tags: [argocd]
+
+    - name: "[3/9] Print ArgoCD pod placement"
+      ansible.builtin.shell: |
+        {{ kubectl }} get pods -n {{ argocd_namespace }} \
+          --field-selector=status.phase=Running \
+          -o custom-columns='POD:.metadata.name,NODE:.spec.nodeName' \
+          --no-headers
       register: argocd_pods
       changed_when: false
+      tags: [argocd]
 
-    - name: Print ArgoCD pods
-      debug:
+    - name: "[3/9] ArgoCD pods"
+      ansible.builtin.debug:
         msg: "{{ argocd_pods.stdout_lines }}"
+      tags: [argocd]
 
-    # ── 6. Gateway API + Nginx Gateway Fabric ─────────────────────────────────
-    # Replaces: Nginx Ingress Controller (baremetal)
-    #
-    # The nginx-gateway service is patched to NodePort 31000/31001 — the same
-    # ports the ALB target group already expects. No Terraform changes needed.
-    #
-    # Traffic flow:
-    #   Internet → ALB :80 → Worker NodePort 31000 → nginx-gateway pod
-    #   nginx-gateway evaluates the HTTPRoute and forwards to the correct service.
+    # ── 4. MetalLB ────────────────────────────────────────────────────────────
+    - name: "[4/9] Create MetalLB namespace"
+      ansible.builtin.shell: |
+        {{ kubectl }} create namespace {{ metallb_namespace }} \
+          --dry-run=client -o yaml | {{ kubectl }} apply -f -
+      register: metallb_ns_result
+      changed_when: >
+        'created' in metallb_ns_result.stdout or
+        'configured' in metallb_ns_result.stdout
+      tags: [metallb]
 
-    - name: Install Gateway API Standard Channel CRDs
-      shell: |
+    - name: "[4/9] Apply MetalLB manifest"
+      ansible.builtin.shell: |
+        {{ kubectl }} apply -f \
+          https://raw.githubusercontent.com/metallb/metallb/v0.13.12/config/manifests/metallb-native.yaml
+      register: metallb_out
+      changed_when: >
+        'created' in metallb_out.stdout or 'configured' in metallb_out.stdout
+      tags: [metallb]
+
+    - name: "[4/9] Wait for MetalLB controller"
+      ansible.builtin.shell: |
+        {{ kubectl }} wait deployment/controller \
+          -n {{ metallb_namespace }} \
+          --for=condition=available \
+          --timeout=30s
+      register: metallb_wait
+      retries: 10
+      delay: 15
+      until: metallb_wait.rc == 0
+      changed_when: false
+      tags: [metallb]
+
+    # Pool name MUST match metallb.universe.tf/address-pool annotation in gateway.yaml
+    - name: "[4/9] Configure MetalLB IPAddressPool ({{ metallb_pool_name }})"
+      ansible.builtin.shell: |
+        cat <<EOF | {{ kubectl }} apply -f -
+        apiVersion: metallb.io/v1beta1
+        kind: IPAddressPool
+        metadata:
+          name: {{ metallb_pool_name }}
+          namespace: {{ metallb_namespace }}
+        spec:
+          addresses:
+            - {{ metallb_ip_range }}
+        EOF
+      register: metallb_pool
+      changed_when: >
+        'created' in metallb_pool.stdout or 'configured' in metallb_pool.stdout
+      tags: [metallb]
+
+    - name: "[4/9] Configure MetalLB L2Advertisement"
+      ansible.builtin.shell: |
+        cat <<EOF | {{ kubectl }} apply -f -
+        apiVersion: metallb.io/v1beta1
+        kind: L2Advertisement
+        metadata:
+          name: default
+          namespace: {{ metallb_namespace }}
+        spec:
+          ipAddressPools:
+            - {{ metallb_pool_name }}
+        EOF
+      register: metallb_l2
+      changed_when: >
+        'created' in metallb_l2.stdout or 'configured' in metallb_l2.stdout
+      tags: [metallb]
+
+    # ── 5. Gateway API CRDs ───────────────────────────────────────────────────
+    # referencegrants.gateway.networking.k8s.io MUST be established before
+    # nginx-gateway starts — if it starts without this CRD it permanently
+    # disables its ReferenceGrant controller, breaking cross-namespace routing.
+    - name: "[5/9] Install Gateway API Standard Channel CRDs"
+      ansible.builtin.shell: |
         {{ kubectl }} apply -f \
           https://github.com/kubernetes-sigs/gateway-api/releases/download/{{ gateway_api_version }}/standard-install.yaml
-      register: gw_crds_install
+      register: gw_crds
       changed_when: >
-        'created' in gw_crds_install.stdout or
-        'configured' in gw_crds_install.stdout
+        'created' in gw_crds.stdout or 'configured' in gw_crds.stdout
+      tags: [gateway-api]
 
-    - name: Wait for Gateway API CRDs to be established
-      shell: |
+    - name: "[5/9] Wait for ALL Gateway API CRDs to be Established"
+      ansible.builtin.shell: |
         {{ kubectl }} wait --for=condition=Established \
           crd/gatewayclasses.gateway.networking.k8s.io \
           crd/gateways.gateway.networking.k8s.io \
           crd/httproutes.gateway.networking.k8s.io \
-          --timeout=60s
+          crd/referencegrants.gateway.networking.k8s.io \
+          --timeout=90s
       changed_when: false
+      tags: [gateway-api]
 
-    - name: Install Nginx Gateway Fabric CRDs
-      shell: |
-        {{ kubectl }} apply -f \
-          https://github.com/nginxinc/nginx-gateway-fabric/releases/download/{{ nginx_gwf_version }}/crds.yaml
-      register: ngf_crds_install
+    # ── 6. Nginx Gateway Fabric (v2.5.1 — provisioner model) ─────────────────
+    # The nginx-gateway controller creates quiz-game-gateway-nginx (data plane)
+    # when it processes the Gateway resource. The ALB targets that service's
+    # NodePort — NOT the nginx-gateway controller service.
+    - name: "[6/9] Install NGF CRDs"
+      ansible.builtin.shell: |
+        {{ kubectl }} apply --server-side -f \
+          https://raw.githubusercontent.com/nginx/nginx-gateway-fabric/{{ nginx_gwf_version }}/deploy/crds.yaml
+      register: ngf_crds
       changed_when: >
-        'created' in ngf_crds_install.stdout or
-        'configured' in ngf_crds_install.stdout
+        'created' in ngf_crds.stdout or 'configured' in ngf_crds.stdout
+      tags: [gateway-api]
 
-    - name: Create nginx-gateway namespace (idempotent)
-      shell: |
+    - name: "[6/9] Create nginx-gateway namespace"
+      ansible.builtin.shell: |
         {{ kubectl }} create namespace {{ gateway_namespace }} \
           --dry-run=client -o yaml | {{ kubectl }} apply -f -
-      changed_when: false
+      register: ngf_ns_result
+      changed_when: >
+        'created' in ngf_ns_result.stdout or
+        'configured' in ngf_ns_result.stdout
+      tags: [gateway-api]
 
-    - name: Check if Nginx Gateway Fabric is already installed
-      command: "{{ kubectl }} get deployment nginx-gateway -n {{ gateway_namespace }}"
+    - name: "[6/9] Check if NGF controller is already installed"
+      ansible.builtin.command: >
+        {{ kubectl }} get deployment nginx-gateway -n {{ gateway_namespace }}
       register: ngf_installed
       ignore_errors: true
       changed_when: false
+      tags: [gateway-api]
 
-    - name: Install Nginx Gateway Fabric controller
-      shell: |
-        {{ kubectl }} apply -f \
-          https://github.com/nginxinc/nginx-gateway-fabric/releases/download/{{ nginx_gwf_version }}/nginx-gateway.yaml
+    - name: "[6/9] Install NGF controller"
+      ansible.builtin.shell: |
+        {{ kubectl }} apply --server-side -f \
+          https://raw.githubusercontent.com/nginx/nginx-gateway-fabric/{{ nginx_gwf_version }}/deploy/default/deploy.yaml
       when: ngf_installed.rc != 0
+      register: ngf_install
+      changed_when: >
+        'created' in ngf_install.stdout or 'configured' in ngf_install.stdout
+      tags: [gateway-api]
 
-    - name: Wait for Nginx Gateway Fabric to be available
-      shell: |
-        {{ kubectl }} wait \
-          --namespace {{ gateway_namespace }} \
+    - name: "[6/9] Wait for NGF controller to be available"
+      ansible.builtin.shell: |
+        {{ kubectl }} wait deployment/nginx-gateway \
+          -n {{ gateway_namespace }} \
           --for=condition=available \
-          deployment/nginx-gateway \
-          --timeout=300s
+          --timeout=30s
       register: ngf_wait
-      retries: 3
+      retries: 10
       delay: 15
       until: ngf_wait.rc == 0
-
-    - name: Get current nginx-gateway NodePorts
-      shell: |
-        {{ kubectl }} get svc nginx-gateway \
-          -n {{ gateway_namespace }} \
-          -o jsonpath='{.spec.ports[?(@.port==80)].nodePort},{.spec.ports[?(@.port==443)].nodePort}'
-      register: current_gw_nodeports
       changed_when: false
+      tags: [gateway-api]
 
-    - name: Patch nginx-gateway to NodePort 31000/31001 (matches ALB target group)
-      shell: |
-        {{ kubectl }} patch svc nginx-gateway \
-          -n {{ gateway_namespace }} \
-          -p '{
-            "spec": {
-              "type": "NodePort",
-              "ports": [
-                {"name": "http",  "port": 80,  "targetPort": 80,  "nodePort": 31000, "protocol": "TCP"},
-                {"name": "https", "port": 443, "targetPort": 443, "nodePort": 31001, "protocol": "TCP"}
-              ]
-            }
-          }'
-      when: current_gw_nodeports.stdout != "31000,31001"
-
-    - name: Confirm nginx-gateway service
-      command: "{{ kubectl }} get svc nginx-gateway -n {{ gateway_namespace }}"
-      register: gw_svc
+    - name: "[6/9] Confirm NGF controller pod"
+      ansible.builtin.shell: |
+        {{ kubectl }} get pods -n {{ gateway_namespace }} \
+          -l app.kubernetes.io/name=nginx-gateway \
+          -o custom-columns='POD:.metadata.name,STATUS:.status.phase,NODE:.spec.nodeName' \
+          --no-headers
+      register: ngf_pods
       changed_when: false
+      tags: [gateway-api]
 
-    - name: Print nginx-gateway service
-      debug:
-        msg: "{{ gw_svc.stdout_lines }}"
+    - name: "[6/9] NGF controller pod"
+      ansible.builtin.debug:
+        msg: "{{ ngf_pods.stdout_lines }}"
+      tags: [gateway-api]
 
-    - name: Verify GatewayClass is accepted
-      shell: |
-        {{ kubectl }} get gatewayclass nginx \
-          -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null || echo "NotFound"
-      register: gwc_status
-      changed_when: false
-
-    - name: Print GatewayClass status
-      debug:
-        msg: "GatewayClass nginx: {{ gwc_status.stdout }} (applied by ArgoCD from k8s/gateway/)"
-
-    # ── 7. Install Helm ───────────────────────────────────────────────────────
-    - name: Check if Helm is already installed
-      command: helm version --short
+    # ── 7. Helm ───────────────────────────────────────────────────────────────
+    - name: "[7/9] Check if Helm is installed"
+      ansible.builtin.command: helm version --short
       register: helm_check
       ignore_errors: true
       changed_when: false
+      tags: [helm]
 
-    - name: Download Helm install script
-      get_url:
-        url: https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    - name: "[7/9] Download Helm install script"
+      ansible.builtin.get_url:
+        url:  https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
         dest: /tmp/get_helm.sh
-        mode: '0755'
+        mode: "0755"
       when: helm_check.rc != 0
+      tags: [helm]
 
-    - name: Install Helm
-      command: /tmp/get_helm.sh
+    - name: "[7/9] Install Helm"
+      ansible.builtin.command: /tmp/get_helm.sh
       when: helm_check.rc != 0
+      changed_when: true
+      tags: [helm]
 
-    - name: Confirm Helm version
-      command: helm version --short
+    - name: "[7/9] Confirm Helm version"
+      ansible.builtin.command: helm version --short
       register: helm_version
       changed_when: false
+      tags: [helm]
 
-    - name: Print Helm version
-      debug:
-        msg: "Helm: {{ helm_version.stdout }}"
+    - name: "[7/9] Helm ready"
+      ansible.builtin.debug:
+        msg: "Helm installed: {{ helm_version.stdout }}"
+      tags: [helm]
 
-    # ── 8. kube-prometheus-stack on Worker Nodes ──────────────────────────────
-    - name: Create monitoring namespace (idempotent)
-      shell: |
+    # ── 8. kube-prometheus-stack ──────────────────────────────────────────────
+    - name: "[8/9] Create monitoring namespace"
+      ansible.builtin.shell: |
         {{ kubectl }} create namespace {{ monitoring_namespace }} \
           --dry-run=client -o yaml | {{ kubectl }} apply -f -
-      changed_when: false
+      register: monitoring_ns_result
+      changed_when: >
+        'created' in monitoring_ns_result.stdout or
+        'configured' in monitoring_ns_result.stdout
+      tags: [prometheus]
 
-    - name: Add Prometheus Community Helm repo
-      command: helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+    - name: "[8/9] Add Prometheus Community Helm repo"
+      ansible.builtin.command: >
+        helm repo add prometheus-community
+        https://prometheus-community.github.io/helm-charts
       register: repo_add
       changed_when: "'already exists' not in repo_add.stdout"
       ignore_errors: true
+      tags: [prometheus]
 
-    - name: Update Helm repos
-      command: helm repo update
+    - name: "[8/9] Update Helm repos"
+      ansible.builtin.command: helm repo update
       changed_when: false
+      tags: [prometheus]
 
-    - name: Check if kube-prometheus-stack is already installed
-      command: helm status prometheus -n {{ monitoring_namespace }}
-      register: prometheus_installed
-      ignore_errors: true
+    - name: "[8/9] Check kube-prometheus-stack Helm release status"
+      ansible.builtin.shell: |
+        helm status prometheus -n {{ monitoring_namespace }} \
+          -o json 2>/dev/null \
+        | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['status'])" \
+        2>/dev/null || echo "notfound"
+      register: prom_status
       changed_when: false
+      tags: [prometheus]
 
-    - name: Check for failed/stuck Helm release and clean it up
-      shell: |
-        STATUS=$(helm status prometheus -n {{ monitoring_namespace }} \
-          -o json 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin)['info']['status'])" 2>/dev/null || echo "notfound")
-        if [ "$STATUS" = "failed" ] || [ "$STATUS" = "pending-install" ]; then
-          helm uninstall prometheus -n {{ monitoring_namespace }} || true
-          echo "cleaned"
-        else
-          echo "ok"
-        fi
-      register: helm_cleanup
-      changed_when: "'cleaned' in helm_cleanup.stdout"
+    - name: "[8/9] Clean up failed/stuck Helm release"
+      ansible.builtin.shell: |
+        helm uninstall prometheus -n {{ monitoring_namespace }} 2>/dev/null || true
+        {{ kubectl }} delete namespace {{ monitoring_namespace }} \
+          --ignore-not-found --wait=true
+        {{ kubectl }} create namespace {{ monitoring_namespace }}
+      when: prom_status.stdout in ['failed', 'pending-install', 'pending-upgrade']
+      changed_when: true
+      tags: [prometheus]
 
-    - name: Install kube-prometheus-stack pinned to worker nodes
-      shell: |
+    - name: "[8/9] Install kube-prometheus-stack on worker nodes"
+      ansible.builtin.shell: |
         helm install prometheus prometheus-community/kube-prometheus-stack \
           --namespace {{ monitoring_namespace }} \
           --set grafana.nodeSelector.role=worker \
@@ -360,154 +584,405 @@
           --set alertmanager.alertmanagerSpec.nodeSelector.role=worker \
           --set prometheusOperator.nodeSelector.role=worker \
           --set kube-state-metrics.nodeSelector.role=worker \
-          --set prometheus-node-exporter.nodeSelector.role=worker \
+          --set prometheus-node-exporter.tolerations[0].operator=Exists \
           --set grafana.adminPassword=admin \
           --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
           --set alertmanager.enabled=true \
-          --timeout 10m
-      when: prometheus_installed.rc != 0 or "'cleaned' in helm_cleanup.stdout"
+          --set grafana.grafana\.ini.server.root_url="%(protocol)s://%(domain)s/grafana" \
+          --set grafana.grafana\.ini.server.serve_from_sub_path=true \
+          --set prometheus.prometheusSpec.externalUrl="http://quiz.{{ ansible_default_ipv4.address }}.nip.io/prometheus" \
+          --set prometheus.prometheusSpec.routePrefix="/prometheus" \
+          --set alertmanager.alertmanagerSpec.externalUrl="http://quiz.{{ ansible_default_ipv4.address }}.nip.io/alertmanager" \
+          --set alertmanager.alertmanagerSpec.routePrefix="/alertmanager" \
+          --timeout 15m \
+          --wait
+      when: prom_status.stdout in ['notfound', 'failed', 'pending-install', 'pending-upgrade']
+      register: prom_install
+      changed_when: true
+      tags: [prometheus]
 
-    - name: Wait for Prometheus operator to be ready (retries every 30s for 10 min)
-      shell: |
-        {{ kubectl }} wait \
-          --namespace {{ monitoring_namespace }} \
+    - name: "[8/9] Wait for Prometheus operator"
+      ansible.builtin.shell: |
+        {{ kubectl }} wait deployment/prometheus-kube-prometheus-operator \
+          -n {{ monitoring_namespace }} \
           --for=condition=available \
-          deployment/prometheus-kube-prometheus-operator \
           --timeout=30s
       register: operator_wait
       retries: 20
       delay: 30
       until: operator_wait.rc == 0
       changed_when: false
+      tags: [prometheus]
 
-    - name: Wait for Grafana to be ready (retries every 30s for 10 min)
-      shell: |
-        {{ kubectl }} wait \
-          --namespace {{ monitoring_namespace }} \
+    - name: "[8/9] Wait for Grafana"
+      ansible.builtin.shell: |
+        {{ kubectl }} wait deployment/prometheus-grafana \
+          -n {{ monitoring_namespace }} \
           --for=condition=available \
-          deployment/prometheus-grafana \
           --timeout=30s
       register: grafana_wait
       retries: 20
       delay: 30
       until: grafana_wait.rc == 0
       changed_when: false
+      tags: [prometheus]
 
-    - name: Confirm monitoring pods and which nodes they landed on
-      shell: |
+    - name: "[8/9] Confirm monitoring pod placement"
+      ansible.builtin.shell: |
         {{ kubectl }} get pods -n {{ monitoring_namespace }} \
-          -o wide --no-headers | awk '{print $1, $3, $7}'
+          -o wide --no-headers \
+          | awk '{printf "%-55s %-12s %s\n", $1, $3, $7}'
       register: monitoring_pods
       changed_when: false
+      tags: [prometheus]
 
-    - name: Print monitoring pod placement
-      debug:
+    - name: "[8/9] Monitoring pods"
+      ansible.builtin.debug:
         msg: "{{ monitoring_pods.stdout_lines }}"
+      tags: [prometheus]
 
-    # ── 9. Create Quiz Game Namespace ─────────────────────────────────────────
-    - name: Create quiz-game namespace (idempotent)
-      shell: |
+    # ── 8a. Gateway bootstrap ─────────────────────────────────────────────────
+    # ArgoCD sync is asynchronous — applying app.yaml registers Applications
+    # but Gateway resources won't exist for several minutes.  Apply manifests
+    # directly so the data-plane service (quiz-game-gateway-nginx) is created
+    # immediately and can be patched to NodePort 31000.
+    # ArgoCD later reconciles and finds them already in-sync — idempotent.
+    - name: "[8/9] Create quiz-game namespace before ArgoCD app registration"
+      ansible.builtin.shell: |
         {{ kubectl }} create namespace {{ quiz_namespace }} \
           --dry-run=client -o yaml | {{ kubectl }} apply -f -
-      changed_when: false
+      register: quiz_ns_early
+      changed_when: >
+        'created' in quiz_ns_early.stdout or
+        'configured' in quiz_ns_early.stdout
+      tags: [prometheus]
 
-    # ── 10. Apply ArgoCD App Manifest ─────────────────────────────────────────
-    # ArgoCD syncs the entire k8s/ directory from the quiz-game GitHub repo.
-    # This deploys:
-    #   k8s/namespace.yaml            → quiz-game namespace labels
-    #   k8s/secrets.yaml              → quiz-secrets (admin-key)
-    #   k8s/redis/                    → Redis deployment + PVC + service
-    #   k8s/game-service/             → Deployment + ClusterIP :3001 + HPA
-    #   k8s/leaderboard-service/      → Deployment + ClusterIP :3002 + HPA
-    #   k8s/frontend-service/         → Deployment + ClusterIP :80
-    #   k8s/gateway/gatewayclass.yaml → GatewayClass nginx
-    #   k8s/gateway/gateway.yaml      → quiz-game-gateway (port 80)
-    #   k8s/gateway/httproute.yaml    → path routing + URL rewrite rules
-    - name: Apply ArgoCD app manifest from GitHub (registers quiz-game with ArgoCD)
-      shell: |
+    - name: "[8/9] Register all ArgoCD applications"
+      ansible.builtin.shell: |
         {{ kubectl }} apply -f \
-          https://raw.githubusercontent.com/YOUR_GH_USER/quiz-game/main/argocd/app.yaml
-      register: argocd_apply
-      # ↑ Replace YOUR_GH_USER with your actual GitHub username before running.
+          https://raw.githubusercontent.com/dennismuturi8/quiz-game/main/argocd/app.yaml
+      register: argocd_apply_early
+      changed_when: >
+        'created' in argocd_apply_early.stdout or
+        'configured' in argocd_apply_early.stdout
+      tags: [prometheus]
 
-    - name: Print ArgoCD apply output
-      debug:
-        msg: "{{ argocd_apply.stdout_lines }}"
+    - name: "[8/9] ArgoCD app registration output"
+      ansible.builtin.debug:
+        msg: "{{ argocd_apply_early.stdout_lines }}"
+      tags: [prometheus]
 
-    # ── 11. Retrieve Passwords ────────────────────────────────────────────────
-    - name: Get ArgoCD admin password
-      shell: |
+    - name: "[8/9] Apply GatewayClass directly"
+      ansible.builtin.shell: |
+        {{ kubectl }} apply -f \
+          https://raw.githubusercontent.com/dennismuturi8/quiz-game/main/k8s/gateway/gatewayclass.yaml
+      register: gwclass_result
+      changed_when: >
+        'created' in gwclass_result.stdout or
+        'configured' in gwclass_result.stdout
+      tags: [prometheus]
+
+    - name: "[8/9] Apply Gateway directly — triggers NGF data-plane provisioning"
+      ansible.builtin.shell: |
+        {{ kubectl }} apply -f \
+          https://raw.githubusercontent.com/dennismuturi8/quiz-game/main/k8s/gateway/gateway.yaml
+      register: gw_result
+      changed_when: >
+        'created' in gw_result.stdout or
+        'configured' in gw_result.stdout
+      tags: [prometheus]
+
+    # ── 8b. Patch data-plane NodePort ────────────────────────────────────────
+    - name: "[8/9] Wait for NGF to provision quiz-game-gateway-nginx service"
+      ansible.builtin.shell: |
+        {{ kubectl }} get svc quiz-game-gateway-nginx \
+          -n {{ gateway_namespace }} --no-headers 2>/dev/null | wc -l
+      register: dp_svc_check
+      retries: 20
+      delay: 10
+      until: dp_svc_check.stdout | trim == "1"
+      changed_when: false
+      tags: [prometheus]
+
+    - name: "[8/9] Read current quiz-game-gateway-nginx NodePort"
+      ansible.builtin.shell: |
+        {{ kubectl }} get svc quiz-game-gateway-nginx \
+          -n {{ gateway_namespace }} \
+          -o jsonpath='{.spec.ports[?(@.port==80)].nodePort}'
+      register: current_dp_nodeport
+      changed_when: false
+      tags: [prometheus]
+
+    - name: "[8/9] Patch quiz-game-gateway-nginx → NodePort {{ alb_node_port }}"
+      ansible.builtin.shell: |
+        {{ kubectl }} patch svc quiz-game-gateway-nginx \
+          -n {{ gateway_namespace }} \
+          -p '{"spec":{"ports":[{"name":"port-80","port":80,"targetPort":80,"nodePort":{{ alb_node_port }},"protocol":"TCP"}]}}'
+      when: current_dp_nodeport.stdout | trim != alb_node_port | string
+      register: dp_patch
+      changed_when: true
+      tags: [prometheus]
+
+    - name: "[8/9] Confirm data-plane NodePort"
+      ansible.builtin.shell: |
+        {{ kubectl }} get svc quiz-game-gateway-nginx \
+          -n {{ gateway_namespace }} \
+          -o custom-columns='SVC:.metadata.name,TYPE:.spec.type,NODEPORT:.spec.ports[*].nodePort,METALLB-IP:.status.loadBalancer.ingress[0].ip' \
+          --no-headers
+      register: dp_svc_confirm
+      changed_when: false
+      tags: [prometheus]
+
+    - name: "[8/9] Data-plane service confirmed"
+      ansible.builtin.debug:
+        msg: "{{ dp_svc_confirm.stdout }}"
+      tags: [prometheus]
+
+    - name: "[8/9] Wait for {{ gateway_name }} to be Programmed"
+      ansible.builtin.shell: |
+        {{ kubectl }} get gateway {{ gateway_name }} \
+          -n {{ gateway_namespace }} \
+          -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}'
+      register: gw_programmed
+      retries: 12
+      delay: 10
+      until: gw_programmed.stdout | trim == "True"
+      changed_when: false
+      tags: [prometheus]
+
+    - name: "[8/9] Gateway Programmed"
+      ansible.builtin.debug:
+        msg: "{{ gateway_name }} Programmed: {{ gw_programmed.stdout }}"
+      tags: [prometheus]
+
+    # ── 8c. Monitoring proxy — ReferenceGrant ────────────────────────────────
+    - name: "[8/9] Create ReferenceGrant — allow nginx-gateway → monitoring"
+      ansible.builtin.shell: |
+        cat <<EOF | {{ kubectl }} apply -f -
+        apiVersion: gateway.networking.k8s.io/v1beta1
+        kind: ReferenceGrant
+        metadata:
+          name: allow-nginx-gateway
+          namespace: {{ monitoring_namespace }}
+        spec:
+          from:
+            - group: gateway.networking.k8s.io
+              kind: HTTPRoute
+              namespace: {{ gateway_namespace }}
+          to:
+            - group: ""
+              kind: Service
+        EOF
+      register: refgrant_result
+      changed_when: >
+        'created' in refgrant_result.stdout or
+        'configured' in refgrant_result.stdout
+      tags: [prometheus]
+
+    # ── 8d. Monitoring proxy — HTTPRoute ─────────────────────────────────────
+    # hostname MUST match the gateway listener's hostname filter (*.nip.io).
+    # Without this, requests arriving at the ALB with a nip.io Host header
+    # will not match this route and get a 404.
+    # sectionName: http targets the specific listener in gateway.yaml.
+    - name: "[8/9] Apply monitoring HTTPRoute"
+      ansible.builtin.shell: |
+        cat <<EOF | {{ kubectl }} apply -f -
+        apiVersion: gateway.networking.k8s.io/v1
+        kind: HTTPRoute
+        metadata:
+          name: monitoring-routes
+          namespace: {{ gateway_namespace }}
+        spec:
+          parentRefs:
+            - name: {{ gateway_name }}
+              namespace: {{ gateway_namespace }}
+              sectionName: {{ gateway_listener }}
+          hostnames:
+            - "{{ gateway_hostname }}"
+          rules:
+            - matches:
+                - path:
+                    type: PathPrefix
+                    value: /grafana
+              backendRefs:
+                - name: prometheus-grafana
+                  namespace: {{ monitoring_namespace }}
+                  port: 80
+            - matches:
+                - path:
+                    type: PathPrefix
+                    value: /prometheus
+              backendRefs:
+                - name: prometheus-kube-prometheus-prometheus
+                  namespace: {{ monitoring_namespace }}
+                  port: 9090
+            - matches:
+                - path:
+                    type: PathPrefix
+                    value: /alertmanager
+              backendRefs:
+                - name: prometheus-kube-prometheus-alertmanager
+                  namespace: {{ monitoring_namespace }}
+                  port: 9093
+        EOF
+      register: monitoring_httproute
+      changed_when: >
+        'created' in monitoring_httproute.stdout or
+        'configured' in monitoring_httproute.stdout
+      tags: [prometheus]
+
+    - name: "[8/9] Verify monitoring HTTPRoute accepted"
+      ansible.builtin.shell: |
+        {{ kubectl }} get httproute monitoring-routes \
+          -n {{ gateway_namespace }} -o json 2>/dev/null \
+        | python3 -c "
+        import sys, json
+        r = json.load(sys.stdin)
+        parents = r.get('status', {}).get('parents', [])
+        if not parents:
+            print('NO_PARENTS — gateway not yet attached')
+            sys.exit(0)
+        for p in parents:
+            for c in p.get('conditions', []):
+                print(c['type'] + ': ' + c['status'] + ' — ' + c.get('message',''))
+        "
+      register: httproute_status
+      changed_when: false
+      retries: 12
+      delay: 10
+      until: >
+        'NO_PARENTS' not in httproute_status.stdout and
+        'Accepted: True' in httproute_status.stdout
+      tags: [prometheus]
+
+    - name: "[8/9] HTTPRoute status"
+      ansible.builtin.debug:
+        msg: "{{ httproute_status.stdout_lines }}"
+      tags: [prometheus]
+
+    # ── 9. Apply k8s manifests ────────────────────────────────────────────────
+    - name: "[9/9] Ensure quiz-game namespace exists"
+      ansible.builtin.shell: |
+        {{ kubectl }} create namespace {{ quiz_namespace }} \
+          --dry-run=client -o yaml | {{ kubectl }} apply -f -
+      register: quiz_ns_result
+      changed_when: >
+        'created' in quiz_ns_result.stdout or
+        'configured' in quiz_ns_result.stdout
+      tags: [quiz-game]
+
+    - name: "[9/9] Check local manifests"
+      delegate_to: localhost
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: local_manifests
+      loop:
+        - "{{ k8s_manifests_dir }}/namespace.yaml"
+        - "{{ k8s_manifests_dir }}/secrets.yaml"
+      tags: [quiz-game]
+
+    - name: "[9/9] Copy and apply namespace.yaml"
+      block:
+        - name: Copy namespace manifest
+          ansible.builtin.copy:
+            src:  "{{ k8s_manifests_dir }}/namespace.yaml"
+            dest: /tmp/quiz-namespace.yaml
+            mode: "0644"
+        - name: Apply namespace manifest
+          ansible.builtin.shell: |
+            {{ kubectl }} apply -f /tmp/quiz-namespace.yaml
+          register: ns_apply_result
+          changed_when: >
+            'created' in ns_apply_result.stdout or
+            'configured' in ns_apply_result.stdout
+      when: local_manifests.results[0].stat.exists
+      tags: [quiz-game]
+
+    - name: "[9/9] Copy and apply secrets.yaml"
+      block:
+        - name: Copy secrets manifest
+          ansible.builtin.copy:
+            src:  "{{ k8s_manifests_dir }}/secrets.yaml"
+            dest: /tmp/quiz-secrets.yaml
+            mode: "0600"
+        - name: Apply secrets manifest
+          ansible.builtin.shell: |
+            {{ kubectl }} apply -f /tmp/quiz-secrets.yaml
+          register: secrets_apply_result
+          changed_when: >
+            'created' in secrets_apply_result.stdout or
+            'configured' in secrets_apply_result.stdout
+      when: local_manifests.results[1].stat.exists
+      tags: [quiz-game]
+
+    - name: "[9/9] Verify secrets"
+      ansible.builtin.shell: |
+        {{ kubectl }} get secret quiz-secrets -n {{ quiz_namespace }} \
+          -o custom-columns='SECRET:.metadata.name,NAMESPACE:.metadata.namespace' \
+          --no-headers
+      register: secret_confirm
+      when: local_manifests.results[1].stat.exists
+      changed_when: false
+      tags: [quiz-game]
+
+    # ── Retrieve passwords ────────────────────────────────────────────────────
+    - name: "Retrieve ArgoCD admin password"
+      ansible.builtin.shell: |
         {{ kubectl }} get secret argocd-initial-admin-secret \
           -n {{ argocd_namespace }} \
           -o jsonpath="{.data.password}" | base64 --decode && echo
       register: argocd_password
       changed_when: false
+      no_log: true
+      tags: [summary]
 
-    - name: Get Grafana admin password
-      shell: |
+    - name: "Retrieve Grafana admin password"
+      ansible.builtin.shell: |
         {{ kubectl }} get secret prometheus-grafana \
           -n {{ monitoring_namespace }} \
           -o jsonpath="{.data.admin-password}" | base64 --decode && echo
       register: grafana_password
       changed_when: false
+      no_log: true
+      tags: [summary]
 
-    # ── 12. Final Summary ─────────────────────────────────────────────────────
-    - name: Print full access summary
-      debug:
+    # ── Final summary ─────────────────────────────────────────────────────────
+    - name: "Cluster Setup Complete"
+      ansible.builtin.debug:
         msg:
-          - "========================================================"
-          - " ✅  Quiz Game Cluster Setup Complete! (Gateway API)"
-          - "========================================================"
+          - "════════════════════════════════════════════════════════════════"
+          - "  ✅  Quiz Game Cluster — Fully Configured (NGF v2.5.1)"
+          - "════════════════════════════════════════════════════════════════"
           - ""
-          - "── Traffic Flow ────────────────────────────────────────"
-          - "  Internet → ALB :80 → NodePort 31000 → nginx-gateway"
-          - "  /api/game/*        → game-service:3001   (path stripped)"
-          - "  /api/leaderboard/* → leaderboard-service:3002 (path stripped)"
+          - "── Traffic Path ────────────────────────────────────────────────"
+          - "  Internet → ALB :80 → EC2 worker:31000 → quiz-game-gateway-nginx"
+          - "  Gateway listener: *.nip.io — use nip.io URLs, not direct IP"
+          - "  /api/game/*        → game-service:3001"
+          - "  /api/leaderboard/* → leaderboard-service:3002"
+          - "  /grafana           → prometheus-grafana:80"
+          - "  /prometheus        → kube-prometheus:9090"
+          - "  /alertmanager      → alertmanager:9093"
           - "  /*                 → frontend-service:80"
           - ""
-          - "── ArgoCD ──────────────────────────────────────────────"
+          - "── ArgoCD ──────────────────────────────────────────────────────"
           - "  Username : admin"
           - "  Password : {{ argocd_password.stdout }}"
-          - "  Access   : ./manage.sh proxy → https://argocd-server.argocd.svc.cluster.local"
-          - "  Or       : kubectl port-forward svc/argocd-server -n argocd 8080:443"
-          - "             then open https://localhost:8080"
+          - "  Apps     : kubectl get applications -n argocd"
+          - "  Local    : kubectl port-forward svc/argocd-server -n argocd 8080:443"
           - ""
-          - "── Grafana ─────────────────────────────────────────────"
+          - "── Grafana ─────────────────────────────────────────────────────"
+          - "  URL      : http://quiz.<ALB-IP>.nip.io/grafana"
           - "  Username : admin"
           - "  Password : {{ grafana_password.stdout }}"
-          - "  Runs on  : Worker nodes (nodeSelector: role=worker)"
-          - "  Access   : ./manage.sh proxy → http://prometheus-grafana.monitoring:80"
-          - "  Or       : kubectl port-forward svc/prometheus-grafana -n monitoring 3000:80"
-          - "             then open http://localhost:3000"
           - ""
-          - "── Prometheus ──────────────────────────────────────────"
-          - "  Runs on  : Worker nodes (nodeSelector: role=worker)"
-          - "  Access   : kubectl port-forward svc/prometheus-kube-prometheus-prometheus -n monitoring 9091:9090"
-          - "             then open http://localhost:9091"
+          - "── Prometheus ──────────────────────────────────────────────────"
+          - "  URL      : http://quiz.<ALB-IP>.nip.io/prometheus"
           - ""
-          - "── Alertmanager ────────────────────────────────────────"
-          - "  Runs on  : Worker nodes (nodeSelector: role=worker)"
-          - "  Access   : kubectl port-forward svc/prometheus-kube-prometheus-alertmanager -n monitoring 9093:9093"
-          - "             then open http://localhost:9093"
+          - "── Alertmanager ────────────────────────────────────────────────"
+          - "  URL      : http://quiz.<ALB-IP>.nip.io/alertmanager"
           - ""
-          - "── Gateway API ─────────────────────────────────────────"
-          - "  Controller : nginx-gateway pod in nginx-gateway namespace"
-          - "  NodePort   : 31000 (HTTP) / 31001 (HTTPS)"
-          - "  GatewayClass / Gateway / HTTPRoute applied by ArgoCD"
-          - "  Check      : ./manage.sh gateway-status"
-          - ""
-          - "── Quiz Game Services (port-forward or SOCKS proxy) ────"
-          - "  Game API      : kubectl port-forward svc/game-service -n quiz-game 3001:3001"
-          - "                  → http://localhost:3001/health"
-          - "                  → http://localhost:3001/questions/random?count=10"
-          - "  Leaderboard   : kubectl port-forward svc/leaderboard-service -n quiz-game 3002:3002"
-          - "                  → http://localhost:3002/leaderboard"
-          - "  Frontend      : kubectl port-forward svc/frontend-service -n quiz-game 8080:80"
-          - "                  → http://localhost:8080"
-          - "  Redis CLI     : kubectl exec -it deploy/redis -n quiz-game -- redis-cli"
-          - ""
-          - "── App URL ─────────────────────────────────────────────"
-          - "  Run     : ./manage.sh urls"
-          - "  Or add to /etc/hosts: <ALB_IP>  quiz.kbucci.local"
-          - "  Then open: http://quiz.kbucci.local"
-          - "========================================================"
+          - "── Quiz Game ───────────────────────────────────────────────────"
+          - "  URL      : http://quiz.<ALB-IP>.nip.io"
+          - "  Run './manage.sh urls' to resolve the actual ALB IP"
+          - "════════════════════════════════════════════════════════════════"
+      tags: [summary]

@@ -1,18 +1,30 @@
 ---
-# App 1 — Frontend-service (Deployment + Service)
+# =============================================================================
+# app.yaml — ArgoCD Application manifests for Quiz Game
+#
+# CRITICAL: ALL Application resources MUST have metadata.namespace: argocd
+# ArgoCD's application-controller only watches the argocd namespace.
+# Setting namespace to quiz-game/nginx-gateway/etc means ArgoCD never sees
+# these apps — they are invisible to it and nothing gets deployed.
+#
+# path: must always point to a DIRECTORY, not a file.
+# ArgoCD reads all .yaml files in the directory and applies them.
+# =============================================================================
+
+# App 1 — Frontend service
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: frontend-app
-  namespace: quiz-game
+  namespace: argocd                          # FIXED: was quiz-game
   finalizers:
-  - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
     repoURL: https://github.com/dennismuturi8/quiz-game.git
     targetRevision: main
-    path: k8s/frontend-service
+    path: k8s/frontend-service              # directory — OK
   destination:
     server: https://kubernetes.default.svc
     namespace: quiz-game
@@ -21,24 +33,24 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-    - CreateNamespace=true
-    - ServerSideApply=true
+      - CreateNamespace=true
+      - ServerSideApply=true
 
 ---
-# App 2 — Game-service (Deployment + Service)
+# App 2 — Game service
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: game-app
-  namespace: quiz-game
+  namespace: argocd                          # FIXED: was quiz-game
   finalizers:
-  - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
     repoURL: https://github.com/dennismuturi8/quiz-game.git
     targetRevision: main
-    path: k8s/game-service
+    path: k8s/game-service                  # directory — OK
   destination:
     server: https://kubernetes.default.svc
     namespace: quiz-game
@@ -47,24 +59,24 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-    - CreateNamespace=true
-    - ServerSideApply=true
+      - CreateNamespace=true
+      - ServerSideApply=true
 
 ---
-# App 3 — Leaderboard-service (Deployment + Service)
+# App 3 — Leaderboard service
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: leaderboard-app
-  namespace: quiz-game
+  namespace: argocd                          # FIXED: was quiz-game
   finalizers:
-  - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
     repoURL: https://github.com/dennismuturi8/quiz-game.git
     targetRevision: main
-    path: k8s/leaderboard-service
+    path: k8s/leaderboard-service           # directory — OK
   destination:
     server: https://kubernetes.default.svc
     namespace: quiz-game
@@ -73,24 +85,24 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-    - CreateNamespace=true
-    - ServerSideApply=true
+      - CreateNamespace=true
+      - ServerSideApply=true
 
 ---
-# App 4 — Redis (in-memory vote queue)
+# App 4 — Redis
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: redis-app
-  namespace: quiz-game
+  namespace: argocd                          # FIXED: was quiz-game
   finalizers:
-  - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
     repoURL: https://github.com/dennismuturi8/quiz-game.git
     targetRevision: main
-    path: k8s/redis
+    path: k8s/redis                         # directory — OK
   destination:
     server: https://kubernetes.default.svc
     namespace: quiz-game
@@ -99,24 +111,27 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-    - CreateNamespace=true
-    - ServerSideApply=true
+      - CreateNamespace=true
+      - ServerSideApply=true
 
 ---
-# App 5 — Gateway (gateway)
+# App 5 — Gateway resources (GatewayClass + Gateway + HTTPRoute)
+# FIXED: was three separate apps each pointing to individual files.
+# ArgoCD path must be a directory. Consolidating to k8s/gateway applies
+# all three manifests in one sync — correct and simpler.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: gateway-app
-  namespace: nginx-gateway
+  namespace: argocd                          # FIXED: was nginx-gateway
   finalizers:
-  - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
     repoURL: https://github.com/dennismuturi8/quiz-game.git
     targetRevision: main
-    path: k8s/gateway/gateway.yaml
+    path: k8s/gateway                       # FIXED: directory, not individual files
   destination:
     server: https://kubernetes.default.svc
     namespace: nginx-gateway
@@ -125,75 +140,24 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-    - CreateNamespace=true
-    - ServerSideApply=true
----
-# App 6 — GatewayClass (gatewayclass)
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: gatewayclass-app
-  namespace: nginx-gateway
-  finalizers:
-  - resources-finalizer.argocd.argoproj.io
-spec:
-  project: default
-  source:
-    repoURL: https://github.com/dennismuturi8/quiz-game.git
-    targetRevision: main
-    path: k8s/gateway/gatewayclass.yaml
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: nginx-gateway
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-    - CreateNamespace=true
-    - ServerSideApply=true
+      - CreateNamespace=true
+      - ServerSideApply=true
 
 ---
-# App 7 - HTTPRoute (httproute)
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: httproute-app
-  namespace: nginx-gateway
-  finalizers:
-  - resources-finalizer.argocd.argoproj.io
-spec:
-  project: default
-  source:
-    repoURL: https://github.com/dennismuturi8/quiz-game.git
-    targetRevision: main
-    path: k8s/gateway/httproute.yaml
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: nginx-gateway
-  syncPolicy:
-    automated:
-      prune: true
-      selfHeal: true
-    syncOptions:
-    - CreateNamespace=true
-    - ServerSideApply=true
-
----
-# App 8 - MetalLB (IPAddressPool + L2Advertisement)
+# App 6 — MetalLB config (IPAddressPool + L2Advertisement)
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: metallb-app
-  namespace: metallb-system
+  namespace: argocd                          # FIXED: was metallb-system
   finalizers:
-  - resources-finalizer.argocd.argoproj.io
+    - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
   source:
     repoURL: https://github.com/dennismuturi8/quiz-game.git
     targetRevision: main
-    path: k8s/metallb/metallb-config.yaml
+    path: k8s/metallb                       # FIXED: directory, not metallb-config.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: metallb-system
@@ -202,5 +166,5 @@ spec:
       prune: true
       selfHeal: true
     syncOptions:
-    - CreateNamespace=true
-    - ServerSideApply=true
+      - CreateNamespace=true
+      - ServerSideApply=true

@@ -1,19 +1,20 @@
 # =============================================================================
-# Gateway — quiz-game-gateway
-# Namespace-scoped resource in the "quiz-game" namespace.
+# gateway.yaml — quiz-game-gateway
+# Namespace: nginx-gateway
 #
-# This Gateway has a SINGLE listener on port 80 for quiz.kbucci.local.
-# All traffic — UI, game API, and leaderboard API — enters through this one
-# listener. The HTTPRoute (httproute.yaml) splits it by path, not by hostname.
+# Single HTTP listener on port 80 accepting *.nip.io hostnames.
+# All traffic enters through this listener; the HTTPRoute (httproute.yaml)
+# splits it by path prefix.
 #
-# The manage.sh urls command reads the nginx-gateway service's LoadBalancer
-# hostname/IP to build the nip.io URL: http://quiz.<ALB_IP>.nip.io
+# MetalLB assigns an IP from the kbucci-pool to the data-plane service
+# (quiz-game-gateway-nginx) created by NGF for this Gateway.
+# External traffic reaches it via ALB → NodePort 31000 — the MetalLB IP
+# is available for internal cluster access only (AWS VPC does not propagate
+# L2 ARP so the VIP is not reachable from outside the cluster network).
 #
 # Verify after apply:
 #   kubectl get gateway quiz-game-gateway -n nginx-gateway
-#   # ADDRESS column must be populated before the HTTPRoute works.
-#   kubectl describe gateway quiz-game-gateway -n quiz-game
-#   # PROGRAMMED condition must be True.
+#   # PROGRAMMED column must be True before HTTPRoutes will work.
 # =============================================================================
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
@@ -24,33 +25,35 @@ metadata:
     app.kubernetes.io/part-of: quiz-game
     app.kubernetes.io/managed-by: argocd
   annotations:
-    # MetalLB: assign an IP from this pool (bare-metal / AWS bare-metal only)
+    # MetalLB pool name — must match the IPAddressPool resource name in
+    # k8s/metallb/metallb-config.yaml (kbucci-pool).
     metallb.universe.tf/address-pool: kbucci-pool
 spec:
   gatewayClassName: nginx
 
   listeners:
-    # ── Single HTTP listener for the quiz game ───────────────────────────────
-    # All requests for quiz.kbucci.local arrive here and are forwarded to
-    # the HTTPRoute below which splits them by path prefix.
+    # ── HTTP listener — accepts all *.nip.io hostnames ───────────────────────
+    # HTTPRoutes must specify hostnames matching *.nip.io (or no hostname,
+    # which inherits this filter).  Direct IP access does not match *.nip.io
+    # so always use the nip.io URL: http://quiz.<ALB_IP>.nip.io
     - name: http
       protocol: HTTP
       port: 80
       hostname: "*.nip.io"
       allowedRoutes:
         namespaces:
-          from: All    
+          from: All
 
     # ── HTTPS listener (uncomment when TLS certificate is available) ──────────
-    # - name: quiz-https
+    # - name: https
     #   protocol: HTTPS
     #   port: 443
-    #   hostname: "quiz.kbucci.local"
+    #   hostname: "*.nip.io"
     #   tls:
     #     mode: Terminate
     #     certificateRefs:
-    #       - name: quiz-tls-secret    # kubectl create secret tls quiz-tls-secret ...
+    #       - name: quiz-tls-secret
     #         kind: Secret
     #   allowedRoutes:
     #     namespaces:
-    #       from: Same
+    #       from: All

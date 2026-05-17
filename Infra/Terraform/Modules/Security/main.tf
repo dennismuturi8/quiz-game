@@ -39,6 +39,14 @@ resource "aws_security_group" "private_sg" {
   protocol    = "tcp"
   cidr_blocks = ["${var.nat_instance_public_ip}/32"]  # Only allow from NAT instance's public IP
 }
+  
+  #Proxy ports. To be deledted later
+  ingress {
+  from_port   = 9090
+  to_port     = 9090
+  protocol    = "tcp"
+  cidr_blocks = ["${var.nat_instance_public_ip}/32"]  # Only allow from NAT instance's public IP
+}
 
   # Kubernetes API (6443) from bastion
   ingress {

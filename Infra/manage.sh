@@ -39,11 +39,12 @@ usage() {
   echo "  ansible   Re-run Ansible only (no Terraform changes)"
   echo ""
   echo -e "${BOLD}Cluster:${NC}"
-  echo "  status    Show ArgoCD app sync and health status"
-  echo "  password  Print ArgoCD and Grafana admin passwords"
-  echo "  urls      nslookup ALB and print nip.io app URLs"
-  echo "  ssh       Open SSH session to control plane via bastion"
-  echo "  proxy     Start SOCKS5 proxy on localhost:9090 via bastion"
+  echo "  status         Show ArgoCD apps, pods, services, monitoring and gateway status"
+  echo "  gateway-status Show HTTPRoutes, Gateway conditions, data-plane NodePort and logs"
+  echo "  password       Print ArgoCD and Grafana admin passwords with access URLs"
+  echo "  urls           Resolve ALB DNS and print all app + monitoring URLs"
+  echo "  ssh            Open SSH session to control plane via bastion"
+  echo "  proxy          Start SOCKS5 proxy on localhost:9090 via bastion"
   echo ""
   exit 1
 }
@@ -186,8 +187,13 @@ case "$1" in
       ALB_IP=$(nslookup "$ALB_DNS" 2>/dev/null | awk '/^Address: / { print $2; exit }')
       if [[ -n "$ALB_IP" ]]; then
         echo -e "${BOLD}─── Quiz Game URLs ────────────────────────────${NC}"
-        echo -e "  🎮 Quiz App   : ${GREEN}http://quiz.$ALB_IP.nip.io${NC}"
-        echo -e "  🏆 Leaderboard: ${GREEN}http://quiz.$ALB_IP.nip.io/leaderboard${NC}"
+        echo -e "  🎮 Quiz App    : ${GREEN}http://quiz.$ALB_IP.nip.io${NC}"
+        echo -e "  🏆 Leaderboard : ${GREEN}http://quiz.$ALB_IP.nip.io/leaderboard${NC}"
+        echo ""
+        echo -e "${BOLD}─── Monitoring URLs (via Gateway) ─────────────${NC}"
+        echo -e "  📈 Grafana      : ${GREEN}http://$ALB_IP/grafana${NC}"
+        echo -e "  🔥 Prometheus   : ${GREEN}http://$ALB_IP/prometheus${NC}"
+        echo -e "  🔔 Alertmanager : ${GREEN}http://$ALB_IP/alertmanager${NC}"
         echo ""
       fi
     fi
@@ -233,31 +239,40 @@ case "$1" in
   status)
     extract_tf_outputs
     setup_ssh_agent
-    info "Fetching ArgoCD status for: $APP_NAME"
+    info "Fetching cluster status..."
     echo ""
 
-    echo -e "${BOLD}─── ArgoCD App ────────────────────────────────${NC}"
-    kube "get application $APP_NAME -n argocd \
-      -o custom-columns=\
-'APP:.metadata.name,\
-SYNC:.status.sync.status,\
-HEALTH:.status.health.status'"
+    echo -e "${BOLD}─── ArgoCD Apps (all) ─────────────────────────${NC}"
+    kube "get applications -n argocd \
+      -o custom-columns=APP:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status" \
+      2>/dev/null || warn "No ArgoCD applications found — run: ./manage.sh ansible"
 
     echo ""
     echo -e "${BOLD}─── Pods ($NAMESPACE) ─────────────────────────${NC}"
-    kube "get pods -n $NAMESPACE -o wide"
+    kube "get pods -n $NAMESPACE -o wide" \
+      2>/dev/null || warn "No pods found in $NAMESPACE"
 
     echo ""
     echo -e "${BOLD}─── Services ($NAMESPACE) ─────────────────────${NC}"
-    kube "get svc -n $NAMESPACE"
-
-    echo ""
-    echo -e "${BOLD}─── Ingress ($NAMESPACE) ──────────────────────${NC}"
-    kube "get ingress -n $NAMESPACE"
+    kube "get svc -n $NAMESPACE" \
+      2>/dev/null || warn "No services found in $NAMESPACE"
 
     echo ""
     echo -e "${BOLD}─── HPAs ($NAMESPACE) ─────────────────────────${NC}"
-    kube "get hpa -n $NAMESPACE"
+    kube "get hpa -n $NAMESPACE" \
+      2>/dev/null || warn "No HPAs found in $NAMESPACE"
+
+    echo ""
+    echo -e "${BOLD}─── Monitoring Pods ───────────────────────────${NC}"
+    kube "get pods -n monitoring -o wide --no-headers" \
+      2>/dev/null | awk '{printf "%-50s %-12s %s\n", $1, $3, $7}' \
+      || warn "No monitoring pods found"
+
+    echo ""
+    echo -e "${BOLD}─── Gateway Data-Plane Service ────────────────${NC}"
+    kube "get svc quiz-game-gateway-nginx -n nginx-gateway \
+      -o custom-columns=SVC:.metadata.name,TYPE:.spec.type,NODEPORT:.spec.ports[*].nodePort,METALLB-IP:.status.loadBalancer.ingress[0].ip" \
+      2>/dev/null || warn "quiz-game-gateway-nginx not found — gateway not yet provisioned"
     ;;
 
 # ─── Command: password ────────────────────────────────────────────────────────
@@ -284,7 +299,13 @@ HEALTH:.status.health.status'"
     echo "  Username : admin"
     echo -e "  Password : ${GREEN}$GRAFANA_PASSWORD${NC}"
     echo ""
-    echo -e "${BOLD}─── Port-forwards (run after: ./manage.sh proxy) ─${NC}"
+    echo -e "${BOLD}─── Monitoring URLs (via ALB — run: ./manage.sh urls) ─${NC}"
+    echo "  📈 Grafana      : http://<ALB-IP>/grafana"
+    echo "  🔥 Prometheus   : http://<ALB-IP>/prometheus"
+    echo "  🔔 Alertmanager : http://<ALB-IP>/alertmanager"
+    echo "  (Run './manage.sh urls' to resolve the actual ALB IP)"
+    echo ""
+    echo -e "${BOLD}─── Port-forwards (fallback / local access) ───${NC}"
     echo "  ArgoCD        : kubectl port-forward svc/argocd-server -n argocd 8080:443"
     echo "                  → https://localhost:8080"
     echo ""
@@ -330,18 +351,63 @@ HEALTH:.status.health.status'"
     fi
 
     echo ""
-    echo -e "${BOLD}─── Quiz Game URLs (via nip.io) ────────────────${NC}"
+    echo -e "${BOLD}─── Quiz Game URLs ─────────────────────────────${NC}"
     echo -e "  🎮 Quiz App    : ${GREEN}http://quiz.$ALB_IP.nip.io${NC}"
     echo -e "  🏆 Leaderboard : ${GREEN}http://quiz.$ALB_IP.nip.io/leaderboard${NC}"
     echo ""
-    echo -e "${BOLD}─── Monitoring (use SOCKS proxy or port-forward) ──${NC}"
-    echo -e "  📈 Grafana      : ${GREEN}http://prometheus-grafana.monitoring.svc.cluster.local${NC}"
-    echo -e "  🔥 Prometheus   : ${GREEN}http://prometheus-kube-prometheus-prometheus.monitoring:9090${NC}"
-    echo -e "  🔔 Alertmanager : ${GREEN}http://prometheus-kube-prometheus-alertmanager.monitoring:9093${NC}"
+    echo -e "${BOLD}─── Monitoring URLs (via ALB → Gateway) ────────${NC}"
+    echo -e "  📈 Grafana      : ${GREEN}http://$ALB_IP/grafana${NC}"
+    echo -e "  🔥 Prometheus   : ${GREEN}http://$ALB_IP/prometheus${NC}"
+    echo -e "  🔔 Alertmanager : ${GREEN}http://$ALB_IP/alertmanager${NC}"
+    echo ""
+    echo -e "${BOLD}─── nip.io aliases ─────────────────────────────${NC}"
+    echo -e "  📈 Grafana      : ${GREEN}http://quiz.$ALB_IP.nip.io/grafana${NC}"
+    echo -e "  🔥 Prometheus   : ${GREEN}http://quiz.$ALB_IP.nip.io/prometheus${NC}"
+    echo -e "  🔔 Alertmanager : ${GREEN}http://quiz.$ALB_IP.nip.io/alertmanager${NC}"
     echo ""
     echo "  ALB DNS : $ALB_DNS"
     echo "  ALB IP  : $ALB_IP"
     echo ""
+    ;;
+
+# ─── Command: gateway-status ──────────────────────────────────────────────────
+  gateway-status)
+    extract_tf_outputs
+    setup_ssh_agent
+    info "Fetching Gateway API status..."
+    echo ""
+
+    echo -e "${BOLD}─── GatewayClasses ────────────────────────────${NC}"
+    kube "get gatewayclass"
+
+    echo ""
+    echo -e "${BOLD}─── Gateways (all namespaces) ─────────────────${NC}"
+    kube "get gateway -A"
+
+    echo ""
+    echo -e "${BOLD}─── HTTPRoutes (all namespaces) ───────────────${NC}"
+    kube "get httproute -A"
+
+    echo ""
+    echo -e "${BOLD}─── monitoring-routes conditions ──────────────${NC}"
+    kube "get httproute monitoring-routes -n nginx-gateway -o json 2>/dev/null | python3 -c \"
+import sys,json
+r=json.load(sys.stdin)
+parents=r.get('status',{}).get('parents',[])
+[print(c['type']+': '+c['status']+' — '+c.get('message','')) for p in parents for c in p.get('conditions',[])] if parents else print('NO_PARENTS — gateway not yet attached')
+\"" 2>/dev/null || warn "monitoring-routes HTTPRoute not found"
+
+    echo ""
+    echo -e "${BOLD}─── ReferenceGrant (monitoring ns) ────────────${NC}"
+    kube "get referencegrant -n monitoring"       2>/dev/null || warn "No ReferenceGrant found in monitoring namespace"
+
+    echo ""
+    echo -e "${BOLD}─── Data-plane service NodePort ───────────────${NC}"
+    kube "get svc quiz-game-gateway-nginx -n nginx-gateway       -o custom-columns=SVC:.metadata.name,TYPE:.spec.type,NODEPORT:.spec.ports[*].nodePort,LB-IP:.status.loadBalancer.ingress[0].ip"       2>/dev/null || warn "quiz-game-gateway-nginx not found — Gateway not yet provisioned"
+
+    echo ""
+    echo -e "${BOLD}─── nginx-gateway logs (last 30 lines) ────────${NC}"
+    kube "logs deployment/nginx-gateway -n nginx-gateway --tail=30"
     ;;
 
 # ─── Command: ssh ─────────────────────────────────────────────────────────────
