@@ -23,11 +23,14 @@ spec:
       containers:
         - name: redis
           image: redis:7-alpine
+          # PVC removed — kubeadm on AWS has no default StorageClass so the
+          # PVC never bound, keeping Redis Pending for 8+ hours.
+          # emptyDir is sufficient for this quiz game; data clears on restart.
           command: ["redis-server", "--appendonly", "yes"]
           ports:
             - containerPort: 6379
           resources:
-            requests: { memory: "64Mi", cpu: "50m" }
+            requests: { memory: "64Mi",  cpu: "50m"  }
             limits:   { memory: "128Mi", cpu: "200m" }
           livenessProbe:
             exec:
@@ -44,16 +47,4 @@ spec:
               mountPath: /data
       volumes:
         - name: redis-data
-          persistentVolumeClaim:
-            claimName: redis-pvc
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: redis-pvc
-  namespace: quiz-game
-spec:
-  accessModes: [ReadWriteOnce]
-  resources:
-    requests:
-      storage: 1Gi
+          emptyDir: {}

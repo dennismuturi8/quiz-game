@@ -29,7 +29,7 @@ spec:
         runAsUser: 1000
       containers:
         - name: leaderboard-service
-          image: dennismuturi8/leaderboard-app:sha-4ee96279086a87bea82e02f90e2a7ce991066935   # updated by CI
+          image: dennismuturi8/leaderboard-app:sha-4ee96279086a87bea82e02f90e2a7ce991066935
           imagePullPolicy: Always
           ports:
             - containerPort: 3002
@@ -41,7 +41,7 @@ spec:
             - name: REDIS_URL
               value: "redis://redis:6379"
           resources:
-            requests: { memory: "64Mi", cpu: "50m" }
+            requests: { memory: "64Mi",  cpu: "50m"  }
             limits:   { memory: "128Mi", cpu: "300m" }
           livenessProbe:
             httpGet:
@@ -61,3 +61,16 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            # Node.js occasionally writes to ~/.npm or process temp dirs.
+            # Both emptyDir volumes satisfy readOnlyRootFilesystem without
+            # requiring a writable layer on the container filesystem.
+            - name: npm-cache
+              mountPath: /home/node/.npm
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: npm-cache
+          emptyDir: {}

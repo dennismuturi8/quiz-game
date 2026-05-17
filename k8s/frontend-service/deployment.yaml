@@ -23,22 +23,46 @@ spec:
     spec:
       containers:
         - name: frontend-service
-          image: dennismuturi8/frontend-app:sha-49e2fd8c85cbcb6bec1b0dd28e1e422d94523110   # updated by CI
+          image: dennismuturi8/frontend-app:sha-49e2fd8c85cbcb6bec1b0dd28e1e422d94523110
           imagePullPolicy: Always
           ports:
             - containerPort: 80
           resources:
-            requests: { memory: "32Mi", cpu: "25m" }
-            limits:   { memory: "64Mi", cpu: "100m" }
+            requests: { memory: "64Mi",  cpu: "25m"  }
+            limits:   { memory: "128Mi", cpu: "200m" }
           livenessProbe:
             httpGet:
-              path: /health
+              # Changed from /health to / — a standard nginx container serving
+              # a React SPA has no /health route. Probing /health returns 404,
+              # which fails the probe after 3 attempts, kills the pod, and
+              # causes the eviction cascade that created 60+ failed pods.
+              # The root path always returns 200 for a correctly built SPA.
+              path: /
               port: 80
             initialDelaySeconds: 5
             periodSeconds: 15
+            failureThreshold: 3
           readinessProbe:
             httpGet:
-              path: /health
+              path: /
               port: 80
             initialDelaySeconds: 3
             periodSeconds: 10
+          volumeMounts:
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-run
+              mountPath: /var/run
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        # nginx writes pid and cache files at runtime. Without these emptyDir
+        # mounts the container crashes if the image runs as non-root with a
+        # read-only filesystem. Safe to include even without explicit
+        # readOnlyRootFilesystem: true — costs nothing, prevents subtle fails.
+        - name: nginx-cache
+          emptyDir: {}
+        - name: nginx-run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
