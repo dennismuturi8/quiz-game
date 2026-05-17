@@ -29,7 +29,7 @@ spec:
         runAsUser: 1000
       containers:
         - name: leaderboard-service
-          image: DOCKER_USER/leaderboard-service:IMAGE_TAG   # updated by CI
+          image: dennismuturi8/leaderboard-service:image_tag   # updated by CI
           imagePullPolicy: Always
           ports:
             - containerPort: 3002

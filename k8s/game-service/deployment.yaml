@@ -30,7 +30,7 @@ spec:
         runAsUser: 1000
       containers:
         - name: game-service
-          image: DOCKER_USER/game-service:IMAGE_TAG   # updated by CI
+          image: dennismuturi8/game-service:image_tag   # updated by CI
           imagePullPolicy: Always
           ports:
             - containerPort: 3001
