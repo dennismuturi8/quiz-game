@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
         - name: frontend-service
-          image: dennismuturi8/frontend-service:image_tag   # updated by CI
+          image: dennismuturi8/frontend-app:sha-49e2fd8c85cbcb6bec1b0dd28e1e422d94523110   # updated by CI
           imagePullPolicy: Always
           ports:
             - containerPort: 80

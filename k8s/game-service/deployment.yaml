@@ -30,7 +30,7 @@ spec:
         runAsUser: 1000
       containers:
         - name: game-service
-          image: dennismuturi8/game-service:image_tag   # updated by CI
+          image: dennismuturi8/game-app:sha-4ee96279086a87bea82e02f90e2a7ce991066935   # updated by CI
           imagePullPolicy: Always
           ports:
             - containerPort: 3001
