@@ -28,6 +28,7 @@ metadata:
     # MetalLB pool name — must match the IPAddressPool resource name in
     # k8s/metallb/metallb-config.yaml (kbucci-pool).
     metallb.universe.tf/address-pool: kbucci-pool
+    gateway.nginx.org/nginx-proxy: quiz-game-proxy
 spec:
   gatewayClassName: nginx
 

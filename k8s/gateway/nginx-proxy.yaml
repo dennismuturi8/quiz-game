@@ -1,0 +1,8 @@
+apiVersion: gateway.nginx.org/v1alpha1
+kind: NginxProxy
+metadata:
+  name: quiz-game-proxy
+  namespace: nginx-gateway
+spec:
+  nginxConfig:
+    serverTokens: "off" 
