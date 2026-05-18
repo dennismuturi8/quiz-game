@@ -1,28 +1,20 @@
 # =============================================================================
 # HTTPRoute — quiz-game-route
-# Namespace-scoped resource in the "quiz-game" namespace.
+# Namespace: nginx-gateway
 #
-# Path-based routing table (evaluated top-to-bottom, most specific first):
+# FIX: Added namespace: quiz-game to all backendRefs.
+# The HTTPRoute lives in nginx-gateway. Without an explicit namespace on each
+# backendRef, Gateway API defaults to the HTTPRoute's own namespace (nginx-gateway)
+# where none of the quiz-game services exist — causing ResolvedRefs: False and
+# a 502 on every request.
 #
-#   Browser request                   Gateway rewrites to     Backend
-#   ────────────────────────────────────────────────────────────────────────────
-#   GET /api/game/questions           GET /questions          game-service:3001
-#   POST /api/game/check              POST /check             game-service:3001
-#   GET /api/leaderboard/leaderboard  GET /leaderboard        leaderboard-service:3002
-#   POST /api/leaderboard/score       POST /score             leaderboard-service:3002
-#   GET /                             GET /                   frontend-service:80
-#   GET /health                       GET /health             frontend-service:80
+# A ReferenceGrant in the quiz-game namespace (referencegrant.yaml) is also
+# required to permit this cross-namespace reference.
 #
-# Why URL rewriting matters:
-#   The browser calls  GET /api/game/questions
-#   The Gateway strips /api/game → game-service receives GET /questions
-#   This matches the Express route defined in game-service/server.js exactly.
-#   Without the rewrite, game-service would receive GET /api/game/questions
-#   and return 404.
-#
-# Verify after apply:
-#   kubectl describe httproute quiz-game-route -n quiz-game
-#   # "Parents" section must show Accepted=True, ResolvedRefs=True
+# Path-based routing table:
+#   /api/game/*        → game-service:3001       (prefix stripped)
+#   /api/leaderboard/* → leaderboard-service:3002 (prefix stripped)
+#   /*                 → frontend-service:80
 # =============================================================================
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -33,23 +25,17 @@ metadata:
     app.kubernetes.io/part-of: quiz-game
     app.kubernetes.io/managed-by: argocd
 spec:
-  # Attach to the quiz-game-gateway, specifically the quiz-http listener
   parentRefs:
     - name:        quiz-game-gateway
       namespace:   nginx-gateway
       sectionName: http
 
-  # Hostname must match the Gateway listener hostname
   hostnames:
     - "*.nip.io"
 
   rules:
 
     # ── Rule 1: Game Service API ───────────────────────────────────────────────
-    # Matches:  /api/game/questions
-    #           /api/game/questions/random?count=10
-    #           /api/game/check  (POST)
-    # Rewrites: strips /api/game → game-service receives /questions, /check etc.
     - matches:
         - path:
             type: PathPrefix
@@ -61,14 +47,12 @@ spec:
               type: ReplacePrefixMatch
               replacePrefixMatch: /
       backendRefs:
-        - name:   game-service
-          port:   3001
-          weight: 1
+        - name:      game-service
+          namespace: quiz-game          # FIXED: explicit namespace
+          port:      3001
+          weight:    1
 
     # ── Rule 2: Leaderboard Service API ───────────────────────────────────────
-    # Matches:  /api/leaderboard/leaderboard
-    #           /api/leaderboard/score  (POST)
-    # Rewrites: strips /api/leaderboard → leaderboard-service receives /leaderboard, /score etc.
     - matches:
         - path:
             type: PathPrefix
@@ -80,19 +64,18 @@ spec:
               type: ReplacePrefixMatch
               replacePrefixMatch: /
       backendRefs:
-        - name:   leaderboard-service
-          port:   3002
-          weight: 1
+        - name:      leaderboard-service
+          namespace: quiz-game          # FIXED: explicit namespace
+          port:      3002
+          weight:    1
 
     # ── Rule 3: Frontend Service (catch-all) ───────────────────────────────────
-    # Matches:  everything not matched above — the quiz game UI
-    # No rewrite needed — frontend-service serves from /
-    # Also handles /health (Nginx returns {"status":"ok"} from its own config)
     - matches:
         - path:
             type: PathPrefix
             value: /
       backendRefs:
-        - name:   frontend-service
-          port:   80
-          weight: 1
+        - name:      frontend-service
+          namespace: quiz-game          # FIXED: explicit namespace
+          port:      80
+          weight:    1
