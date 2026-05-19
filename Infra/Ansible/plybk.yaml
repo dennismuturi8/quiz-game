@@ -336,6 +336,19 @@
         msg: "{{ argocd_pods.stdout_lines }}"
       tags: [argocd]
 
+    - name: "[3/9] Set resource limits on ArgoCD repo-server"
+      ansible.builtin.shell: |
+        {{ kubectl }} patch deployment argocd-repo-server \
+          -n {{ argocd_namespace }} \
+          --type=json -p='[
+            {"op":"add","path":"/spec/template/spec/containers/0/resources","value":{
+              "requests":{"memory":"128Mi","cpu":"50m"},
+              "limits":{"memory":"512Mi","cpu":"500m"}
+            }}
+          ]'
+      changed_when: true
+      tags: [argocd]  
+
     # ── 4. MetalLB ────────────────────────────────────────────────────────────
     - name: "[4/9] Create MetalLB namespace"
       ansible.builtin.shell: |
@@ -674,23 +687,18 @@
 
     - name: "[8/9] Apply GatewayClass directly"
       ansible.builtin.shell: |
-        {{ kubectl }} apply -f \
+        {{ kubectl }} apply --server-side --force-conflicts -f \
           https://raw.githubusercontent.com/dennismuturi8/quiz-game/main/k8s/gateway/gatewayclass.yaml
-      register: gwclass_result
-      changed_when: >
-        'created' in gwclass_result.stdout or
-        'configured' in gwclass_result.stdout
-      tags: [prometheus]
 
     - name: "[8/9] Apply Gateway directly — triggers NGF data-plane provisioning"
       ansible.builtin.shell: |
-        {{ kubectl }} apply -f \
+        {{ kubectl }} apply --server-side --force-conflicts -f \
           https://raw.githubusercontent.com/dennismuturi8/quiz-game/main/k8s/gateway/gateway.yaml
-      register: gw_result
-      changed_when: >
-        'created' in gw_result.stdout or
-        'configured' in gw_result.stdout
-      tags: [prometheus]
+
+    - name: "[8/9] Apply Gateway directly — triggers NGF data-plane provisioning"
+      ansible.builtin.shell: |
+        {{ kubectl }} apply --server-side --force-conflicts -f \
+          https://raw.githubusercontent.com/dennismuturi8/quiz-game/main/k8s/gateway/httproute.yaml
 
     # ── 8b. Patch data-plane NodePort ────────────────────────────────────────
     - name: "[8/9] Wait for NGF to provision quiz-game-gateway-nginx service"
@@ -778,6 +786,29 @@
         'created' in refgrant_result.stdout or
         'configured' in refgrant_result.stdout
       tags: [prometheus]
+
+    - name: "[8/9] Create ReferenceGrant — allow nginx-gateway → quiz-game services"
+      ansible.builtin.shell: |
+        cat <<EOF | {{ kubectl }} apply -f -
+        apiVersion: gateway.networking.k8s.io/v1beta1
+        kind: ReferenceGrant
+        metadata:
+          name: allow-nginx-gateway
+          namespace: {{ quiz_namespace }}
+        spec:
+          from:
+            - group: gateway.networking.k8s.io
+              kind: HTTPRoute
+              namespace: {{ gateway_namespace }}
+          to:
+            - group: ""
+              kind: Service
+        EOF
+      register: quiz_refgrant
+      changed_when: >
+        'created' in quiz_refgrant.stdout or
+        'configured' in quiz_refgrant.stdout
+      tags: [prometheus]  
 
     # ── 8d. Monitoring proxy — HTTPRoute ─────────────────────────────────────
     # hostname MUST match the gateway listener's hostname filter (*.nip.io).
